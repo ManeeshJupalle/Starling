@@ -1,0 +1,44 @@
+"""Role -> system prompt, plus the default model.
+
+Same model, different system prompts per role (ARCHITECTURE.md §2.5). Workers are
+stateless; their behaviour is entirely defined by the system prompt selected here.
+"""
+
+from __future__ import annotations
+
+DEFAULT_MODEL = "claude-sonnet-4-6"
+
+ROLE_PROMPTS: dict[str, str] = {
+    "researcher": (
+        "You are a research worker in a multi-agent assistant. Given a task, gather "
+        "and lay out the relevant facts, options, and trade-offs accurately and "
+        "concisely. Prefer concrete specifics over generalities; do not pad."
+    ),
+    "summarizer": (
+        "You are a summarization worker in a multi-agent assistant. Produce a clear, "
+        "well-structured, balanced summary of the requested topic. Be concise; use "
+        "short sections or bullets when they aid clarity."
+    ),
+    "coder": (
+        "You are a coding worker in a multi-agent assistant. Produce correct, minimal, "
+        "idiomatic code for the task with a one-line explanation. No unnecessary "
+        "boilerplate."
+    ),
+    "pm": (
+        "You are the project manager in a multi-agent assistant. Decompose a goal into "
+        "a small, acyclic set of concrete tasks for the available worker roles. Used "
+        "in project mode."
+    ),
+}
+
+# Roles dispatchable as ephemeral fan-out workers. 'pm' plans projects; it is not an
+# ephemeral worker, so it is excluded here.
+WORKER_ROLES: tuple[str, ...] = ("researcher", "summarizer", "coder")
+
+# Roles a PM may assign to a planned task: the workers plus 'pm', whose description is
+# a question routed to the user at a decision point (human-in-the-loop, ARCHITECTURE.md §3).
+PLAN_ROLES: tuple[str, ...] = WORKER_ROLES + ("pm",)
+
+# Model-per-role would plug in here: map a role to its own model and have
+# worker.run_task look it up, falling back to DEFAULT_MODEL. Documented, not built (v1).
+#   ROLE_MODELS = {"coder": "claude-opus-4-8", "summarizer": "claude-haiku-4-5-20251001"}
