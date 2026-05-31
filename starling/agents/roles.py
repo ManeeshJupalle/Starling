@@ -17,6 +17,13 @@ def active_model() -> str:
     return os.environ.get("LLM_MODEL") or DEFAULT_MODEL
 
 
+def pm_model() -> str:
+    """Model for the PM's planning call. Task decomposition is the hardest single
+    judgement in the system (ARCHITECTURE.md §4.1), so it's worth a stronger model
+    than the workers. PM_MODEL overrides; otherwise it falls back to active_model()."""
+    return os.environ.get("PM_MODEL") or active_model()
+
+
 ROLE_PROMPTS: dict[str, str] = {
     "researcher": (
         "You are a research worker in a multi-agent assistant. Given a task, gather "

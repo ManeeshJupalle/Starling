@@ -17,7 +17,7 @@ from openai import AsyncOpenAI
 from .. import usage
 from ..llm import make_client, tool_args
 from ..schemas import PlannedTask, ProjectPlan
-from .roles import PLAN_ROLES, ROLE_PROMPTS, active_model
+from .roles import PLAN_ROLES, ROLE_PROMPTS, pm_model
 
 MAX_TASKS = 12
 
@@ -27,6 +27,11 @@ _DECOMPOSE_GUIDANCE = (
     "- Each task's 'role' must be one of: {roles}.\n"
     "- 'depends_on' lists the 0-based indices of other tasks in your list that must "
     "finish before this one. Leave it empty for tasks that can start immediately.\n"
+    "- A task receives ONLY the outputs of the tasks listed in its 'depends_on'. So if a "
+    "task uses another task's result — saving it, choosing among it, summarizing it, or "
+    "building on it — it MUST list that task in 'depends_on', or it will run blind without "
+    "the data it needs. Concretely: a task that SAVES or WRITES a chosen item must depend "
+    "on the task that PRODUCED that item (and on any task that selected among the options).\n"
     "- Prefer independent gathering/research tasks that can run in parallel, feeding a "
     "final task that produces the user-facing deliverable.\n"
     "- If the goal needs a decision from the user, make the FIRST task a 'pm' task whose "
@@ -157,7 +162,7 @@ async def decompose(goal: str, *, client: Optional[AsyncOpenAI] = None) -> Proje
     """Decompose a project goal into a validated, acyclic ProjectPlan."""
     client = client or _get_client()
     resp = await client.chat.completions.create(
-        model=active_model(),
+        model=pm_model(),
         max_tokens=2048,
         messages=[
             {"role": "system", "content": ROLE_PROMPTS["pm"] + _DECOMPOSE_GUIDANCE},
