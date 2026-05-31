@@ -38,8 +38,8 @@ def test_github_filter() -> None:
 
 
 def test_role_grant() -> None:
-    print("\nresearcher granted both servers:")
-    check("researcher -> filesystem + github", ROLE_TOOLS["researcher"] == ["filesystem", "github"])
+    print("\nresearcher granted the github server:")
+    check("github in researcher's tools", "github" in ROLE_TOOLS["researcher"])
 
 
 async def test_resilience() -> None:

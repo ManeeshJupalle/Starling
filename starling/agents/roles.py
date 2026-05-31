@@ -54,7 +54,7 @@ PLAN_ROLES: tuple[str, ...] = WORKER_ROLES + ("pm",)
 
 # Which MCP servers each worker role may use. Read-only until Phase B adds approval.
 ROLE_TOOLS: dict[str, list[str]] = {
-    "researcher": ["filesystem", "github"],
+    "researcher": ["filesystem", "github", "web"],
     "summarizer": ["filesystem"],
     "coder": ["filesystem"],
 }

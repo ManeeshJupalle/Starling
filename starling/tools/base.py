@@ -21,6 +21,7 @@ class Tool:
     description: str
     schema: dict[str, Any]  # JSON Schema for the arguments
     call: ToolCall
+    force_safe: bool = False  # True => always auto-run (e.g. a search/fetch server)
 
     def openai_def(self) -> dict[str, Any]:
         """Render as an OpenAI function-tool definition."""
@@ -58,6 +59,11 @@ class ToolRegistry:
             return f"error: unknown tool {name!r}"
         return await tool.call(args)
 
+    def is_safe(self, name: str) -> bool:
+        """Whether a tool can auto-run (no approval needed)."""
+        tool = self._tools.get(name)
+        return tool_is_safe(tool) if tool is not None else is_read_only(name)
+
 
 # Read-only prefixes — only tools whose operation starts with one of these are exposed
 # to workers until the approval layer (Phase B) can gate state-changing actions. This is
@@ -73,3 +79,12 @@ def is_read_only(tool_name: str) -> bool:
     """Heuristic: is this tool safe to auto-run (no external state change)?"""
     op = tool_name.split("__", 1)[-1].lower()
     return op.startswith(_READ_PREFIXES)
+
+
+def tool_is_safe(tool: Tool) -> bool:
+    """Safe (auto-run) if its server forced it so, or its name reads as read-only.
+
+    The override matters for search/fetch servers whose tool names (e.g.
+    ``brave_web_search``) don't begin with a read verb but are still read-only.
+    """
+    return tool.force_safe or is_read_only(tool.name)

@@ -77,7 +77,8 @@ async def _answer_calls(messages, calls, tools, allow_sensitive, role) -> Option
     Returns a paused WorkerResult, or None when every call has been executed.
     """
     for i, call in enumerate(calls):
-        if allow_sensitive and not is_read_only(call["name"]):
+        safe = tools.is_safe(call["name"]) if tools is not None else is_read_only(call["name"])
+        if allow_sensitive and not safe:
             return WorkerResult(
                 done=False, messages=messages, remaining=calls[i:],
                 question=f"The agent wants to run {call['name']}({call['arguments'][:160]}). "

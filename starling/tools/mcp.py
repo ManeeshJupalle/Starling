@@ -16,7 +16,7 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from .base import Tool, ToolRegistry, is_read_only
+from .base import Tool, ToolRegistry, tool_is_safe
 
 DEFAULT_CONFIG_PATH = "mcp_servers.json"
 
@@ -65,14 +65,15 @@ class MCPManager:
         session = await self._stack.enter_async_context(ClientSession(read, write))
         await session.initialize()
         self._sessions[name] = session
+        read_only = bool(spec.get("read_only", False))  # per-server "trust as safe" override
         tools_result = await session.list_tools()
         for mcp_tool in tools_result.tools:
-            tool = self._wrap(name, session, mcp_tool)
+            tool = self._wrap(name, session, mcp_tool, read_only)
             self._tools[tool.name] = tool
         print(f"[mcp] connected '{name}': {len(tools_result.tools)} tools")
 
     @staticmethod
-    def _wrap(server: str, session: ClientSession, mcp_tool: Any) -> Tool:
+    def _wrap(server: str, session: ClientSession, mcp_tool: Any, read_only: bool = False) -> Tool:
         async def _call(args: dict[str, Any]) -> str:
             return _content_text(await session.call_tool(mcp_tool.name, args))
 
@@ -81,6 +82,7 @@ class MCPManager:
             description=mcp_tool.description or "",
             schema=mcp_tool.inputSchema or {"type": "object", "properties": {}},
             call=_call,
+            force_safe=read_only,
         )
 
     def tools(self) -> list[Tool]:
@@ -96,7 +98,7 @@ class MCPManager:
         for tool in self._tools.values():
             if tool.name.split("__", 1)[0] not in servers:
                 continue
-            if not include_sensitive and not is_read_only(tool.name):
+            if not include_sensitive and not tool_is_safe(tool):
                 continue
             registry.add(tool)
         return registry

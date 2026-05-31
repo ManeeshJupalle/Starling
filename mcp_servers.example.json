@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to mcp_servers.json and edit. The real file is gitignored (it may hold tokens). Leave a server's token empty to disable it gracefully.",
+  "_comment": "Copy to mcp_servers.json and edit. The real file is gitignored (it may hold tokens). Leave a server's token empty to disable it gracefully. 'read_only': true marks a whole server's tools as auto-run (use only for genuinely read-only servers like search/fetch).",
   "mcpServers": {
     "filesystem": {
       "command": "npx",
@@ -9,6 +9,12 @@
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"],
       "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_your_token_here" }
+    },
+    "web": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": { "BRAVE_API_KEY": "your_brave_search_api_key" },
+      "read_only": true
     }
   }
 }
