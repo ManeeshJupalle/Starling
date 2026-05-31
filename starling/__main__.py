@@ -18,6 +18,7 @@ from .channels.telegram import TelegramChannel
 from .llm import make_client
 from .orchestrator import Orchestrator
 from .scheduler import Scheduler
+from .tools.mcp import MCPManager
 
 
 def main() -> None:
@@ -42,12 +43,21 @@ def main() -> None:
     channel = TelegramChannel(config.TELEGRAM_BOT_TOKEN)
     client = make_client(config.LLM_API_KEY, config.LLM_BASE_URL)
     blackboard = Blackboard()
-    scheduler = Scheduler(blackboard, channel, client, config.TICK_INTERVAL)
-    orchestrator = Orchestrator(channel, client, blackboard, scheduler)
+    tools_manager = MCPManager()
+    scheduler = Scheduler(blackboard, channel, client, config.TICK_INTERVAL, tools_manager=tools_manager)
+    orchestrator = Orchestrator(channel, client, blackboard, scheduler, tools_manager=tools_manager)
     channel.on_message(orchestrator.handle_message)
 
-    print("Starling running (ephemeral + project mode, scheduler active). Ctrl+C to stop.")
-    channel.run(on_start=scheduler.run)
+    async def _startup() -> None:
+        # Connect MCP servers first (so tools are ready), then run the scheduler loop.
+        try:
+            await tools_manager.start()
+        except Exception as exc:  # tools are best-effort; the bot still runs without them
+            print(f"[mcp] startup failed (continuing without tools): {exc}")
+        await scheduler.run()
+
+    print("Starling running (MCP tools + project mode, scheduler active). Ctrl+C to stop.")
+    channel.run(on_start=_startup)
 
 
 if __name__ == "__main__":

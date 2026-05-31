@@ -45,7 +45,8 @@ class _Fn:
 
 
 class _ToolCall:
-    def __init__(self, name: str, arguments: str) -> None:
+    def __init__(self, name: str, arguments: str, id: str = "call_0") -> None:
+        self.id = id
         self.function = _Fn(name, arguments)
 
 

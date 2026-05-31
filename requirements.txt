@@ -2,3 +2,4 @@ openai
 python-telegram-bot
 pydantic
 python-dotenv
+mcp

@@ -15,7 +15,7 @@ from typing import Any, Optional
 from openai import AsyncOpenAI
 
 from .agents.pm import decompose, topological_order
-from .agents.roles import WORKER_ROLES, active_model
+from .agents.roles import WORKER_ROLES, active_model, tools_for_role
 from .agents.worker import run_task
 from .blackboard import Blackboard, TaskStatus
 from .channels.base import Channel
@@ -72,11 +72,13 @@ class Orchestrator:
         client: AsyncOpenAI,
         blackboard: Blackboard,
         scheduler: Optional[Scheduler] = None,
+        tools_manager=None,
     ) -> None:
         self._channel = channel
         self._client = client
         self._bb = blackboard
         self._scheduler = scheduler
+        self._tools_mgr = tools_manager
 
     async def handle_message(self, chat_id: int, text: str) -> None:
         """Route a reply to a task awaiting a human decision; else classify as new."""
@@ -124,7 +126,11 @@ class Orchestrator:
         """Fan out to the chosen workers in parallel, then merge into one reply."""
         workers = [w for w in classification.workers if w in WORKER_ROLES] or ["summarizer"]
         outputs = await asyncio.gather(
-            *(run_task(role, classification.goal, client=self._client) for role in workers)
+            *(
+                run_task(role, classification.goal, client=self._client,
+                         tools=tools_for_role(self._tools_mgr, role))
+                for role in workers
+            )
         )
         drafts = list(zip(workers, outputs))
         if len(drafts) == 1:

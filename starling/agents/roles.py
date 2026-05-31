@@ -51,3 +51,23 @@ PLAN_ROLES: tuple[str, ...] = WORKER_ROLES + ("pm",)
 # Model-per-role would plug in here: map a role to its own model and have
 # worker.run_task / active_model look it up, falling back to DEFAULT_MODEL.
 #   ROLE_MODELS = {"coder": "openai/gpt-4o", "summarizer": "groq/llama-3.1-8b-instant"}
+
+# Which MCP servers each worker role may use. Read-only until Phase B adds approval.
+ROLE_TOOLS: dict[str, list[str]] = {
+    "researcher": ["filesystem"],
+    "summarizer": ["filesystem"],
+    "coder": ["filesystem"],
+}
+
+
+def tools_for_role(manager, role: str):
+    """The read-only ToolRegistry a role may use, or None if it has no tools/manager.
+
+    ``manager`` is an MCPManager (duck-typed to keep this module free of tool imports).
+    """
+    if manager is None:
+        return None
+    servers = ROLE_TOOLS.get(role, [])
+    if not servers:
+        return None
+    return manager.registry_for(servers, include_sensitive=False)

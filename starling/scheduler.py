@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 from openai import AsyncOpenAI
 
+from .agents.roles import tools_for_role
 from .agents.worker import run_task
 from .blackboard import Blackboard, TaskStatus
 from .channels.base import Channel
@@ -31,11 +32,13 @@ class Scheduler:
         channel: Channel,
         client: AsyncOpenAI,
         tick_interval: float,
+        tools_manager=None,
     ) -> None:
         self._bb = blackboard
         self._channel = channel
         self._client = client
         self._tick_interval = tick_interval
+        self._tools_mgr = tools_manager
         self._wake = asyncio.Event()
         self._reported: set[int] = set()  # projects already reported complete
 
@@ -80,7 +83,8 @@ class Scheduler:
         try:
             inputs = self._gather_inputs(task)
             output = await run_task(
-                task["role"], task["description"], inputs, client=self._client
+                task["role"], task["description"], inputs,
+                client=self._client, tools=tools_for_role(self._tools_mgr, task["role"]),
             )
         except Exception as exc:  # record the failure and move on; dependents stall
             print(f"[scheduler] task #{task['id']} FAILED: {exc}")

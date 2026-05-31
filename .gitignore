@@ -12,3 +12,10 @@ __pycache__/
 
 # Local build-notes (reference only, intentionally not shared)
 Starling-claw-prompts.md
+
+# MCP config — may hold tokens; commit mcp_servers.example.json instead
+mcp_servers.json
+
+# Agent workspace — keep the sample README, ignore user/agent files
+workspace/*
+!workspace/README.md
