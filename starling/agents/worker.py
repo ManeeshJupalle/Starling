@@ -114,17 +114,21 @@ async def run_task(
     client: Optional[AsyncOpenAI] = None,
     tools: Optional[ToolRegistry] = None,
     allow_sensitive: bool = False,
+    memory: str = "",
     max_tokens: int = 1024,
     max_steps: int = 6,
 ) -> WorkerResult:
-    """Run a task; may pause for approval if ``allow_sensitive`` and a write tool is called."""
+    """Run a task; may pause for approval if ``allow_sensitive`` and a write tool is called.
+
+    ``memory`` (if given) is injected as user-context the worker should honor.
+    """
     if role not in ROLE_PROMPTS:
         raise ValueError(f"unknown role: {role!r}")
     client = client or _get_client()
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": ROLE_PROMPTS[role]},
-        {"role": "user", "content": _build_user_prompt(description, inputs or {})},
-    ]
+    messages: list[dict[str, Any]] = [{"role": "system", "content": ROLE_PROMPTS[role]}]
+    if memory:
+        messages.append({"role": "system", "content": f"What you know about the user (honor it):\n{memory}"})
+    messages.append({"role": "user", "content": _build_user_prompt(description, inputs or {})})
     return await _loop(messages, client=client, tools=tools, allow_sensitive=allow_sensitive,
                        role=role, max_tokens=max_tokens, max_steps=max_steps)
 

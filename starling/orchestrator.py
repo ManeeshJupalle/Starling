@@ -20,6 +20,7 @@ from .agents.worker import resume_task, run_task
 from .blackboard import Blackboard, TaskStatus
 from .channels.base import Channel
 from .llm import text_of, tool_args
+from .memory import recall_context
 from .scheduler import Scheduler
 from .schemas import Classification, Mode
 
@@ -44,7 +45,11 @@ _CLASSIFIER_SYSTEM = (
     "'goal' is the user's overall objective as one clear instruction (e.g. 'Plan a "
     "weekend itinerary'), NOT a sub-step like 'ask the user which city'.\n"
     f"'workers' applies only to ephemeral requests: the roles to fan out to, chosen from "
-    f"{', '.join(WORKER_ROLES)} (pick only the few that apply; leave empty for projects)."
+    f"{', '.join(WORKER_ROLES)} (pick only the few that apply; leave empty for projects).\n"
+    "'memory': if this message states a DURABLE preference or fact about the user worth "
+    "remembering for future requests (e.g. 'I prefer concise answers', 'I use Python', "
+    "'I'm vegetarian'), put a short third-person statement there; otherwise null. Do not "
+    "put one-off task details in memory."
 )
 
 _MERGE_SYSTEM = (
@@ -99,8 +104,11 @@ class Orchestrator:
                 return
             classification = await self._classify(text)
             print(f"[orchestrator] classified as {classification.mode.value}: {classification.goal[:70]}")
+            if classification.memory:
+                self._bb.add_memory(chat_id, classification.memory)
+                print(f"[orchestrator] remembered: {classification.memory[:60]}")
             if classification.mode == Mode.EPHEMERAL:
-                reply = await self._run_ephemeral(classification)
+                reply = await self._run_ephemeral(chat_id, classification)
             else:
                 reply = await self._start_project(chat_id, classification)
             await self._channel.send(chat_id, reply)
@@ -163,20 +171,22 @@ class Orchestrator:
         )
         return Classification.model_validate(tool_args(resp))
 
-    async def _run_ephemeral(self, classification: Classification) -> str:
+    async def _run_ephemeral(self, chat_id: int, classification: Classification) -> str:
         """Fan out to the chosen workers in parallel, then merge into one reply."""
+        memory = recall_context(self._bb, chat_id)
         workers = [w for w in classification.workers if w in WORKER_ROLES] or ["summarizer"]
         results = await asyncio.gather(
             *(
                 run_task(role, classification.goal, client=self._client,
-                         tools=tools_for_role(self._tools_mgr, role, allow_sensitive=False))
+                         tools=tools_for_role(self._tools_mgr, role, allow_sensitive=False),
+                         memory=memory)
                 for role in workers
             )
         )
         drafts = [(role, result.output) for role, result in zip(workers, results)]
         if len(drafts) == 1:
             return drafts[0][1]
-        return await self._merge(classification.goal, drafts)
+        return await self._merge(classification.goal, drafts, memory)
 
     async def _start_project(self, chat_id: int, classification: Classification) -> str:
         """Decompose the goal and persist the task graph to the blackboard.
@@ -199,13 +209,14 @@ class Orchestrator:
             self._scheduler.poke()  # start executing the new tasks now
         return f"Project #{project_id} started - {len(plan.tasks)} tasks queued."
 
-    async def _merge(self, goal: str, drafts: list[tuple[str, str]]) -> str:
+    async def _merge(self, goal: str, drafts: list[tuple[str, str]], memory: str = "") -> str:
         joined = "\n\n".join(f"[{role}]\n{output}" for role, output in drafts)
+        system = _MERGE_SYSTEM + (f"\n\nUser context to honor:\n{memory}" if memory else "")
         resp = await self._client.chat.completions.create(
             model=active_model(),
             max_tokens=1024,
             messages=[
-                {"role": "system", "content": _MERGE_SYSTEM},
+                {"role": "system", "content": system},
                 {"role": "user", "content": f"User request:\n{goal}\n\nWorker drafts:\n{joined}"},
             ],
         )

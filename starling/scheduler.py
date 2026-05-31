@@ -21,6 +21,7 @@ from .agents.roles import tools_for_role
 from .agents.worker import run_task
 from .blackboard import Blackboard, TaskStatus
 from .channels.base import Channel
+from .memory import recall_context
 
 
 class Scheduler:
@@ -85,7 +86,7 @@ class Scheduler:
             result = await run_task(
                 task["role"], task["description"], inputs, client=self._client,
                 tools=tools_for_role(self._tools_mgr, task["role"], allow_sensitive=True),
-                allow_sensitive=True,
+                allow_sensitive=True, memory=self._recall_memory(task),
             )
         except Exception as exc:  # record the failure and move on; dependents stall
             print(f"[scheduler] task #{task['id']} FAILED: {exc}")
@@ -123,6 +124,13 @@ class Scheduler:
         project = self._bb.get_project(task["project_id"]) if task["project_id"] else None
         if project is not None:
             await self._channel.send(project["chat_id"], task["description"])
+
+    def _recall_memory(self, task: dict[str, Any]) -> str:
+        """What's known about the task's user, for injecting into the worker prompt."""
+        if not task["project_id"]:
+            return ""
+        project = self._bb.get_project(task["project_id"])
+        return recall_context(self._bb, project["chat_id"]) if project else ""
 
     def _gather_inputs(self, task: dict[str, Any]) -> dict[str, Any]:
         """Collect upstream task outputs to feed this task (ARCHITECTURE.md §2.5)."""

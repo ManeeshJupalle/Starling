@@ -52,6 +52,14 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS memories (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    INTEGER NOT NULL,
+    text       TEXT    NOT NULL,
+    tags       TEXT    NOT NULL DEFAULT '[]',
+    created_at TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -231,6 +239,32 @@ class Blackboard:
                 (chat_id, TaskStatus.AWAITING_HUMAN.value),
             ).fetchone()
         return self._row_to_task(row) if row else None
+
+    # --- memories ----------------------------------------------------------
+
+    def add_memory(self, chat_id: int, text: str, tags: Optional[list[str]] = None) -> int:
+        """Store a durable fact/preference about the user; return its id."""
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO memories (chat_id, text, tags) VALUES (?, ?, ?)",
+                (chat_id, text, json.dumps(tags or [])),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def recall_memories(self, chat_id: int, limit: int = 10) -> list[dict[str, Any]]:
+        """Return up to ``limit`` of this chat's most recent memories, oldest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM memories WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+                (chat_id, limit),
+            ).fetchall()
+        memories = []
+        for row in reversed(rows):
+            memory = dict(row)
+            memory["tags"] = json.loads(memory["tags"]) if memory["tags"] else []
+            memories.append(memory)
+        return memories
 
     def close(self) -> None:
         """Close the underlying connection."""

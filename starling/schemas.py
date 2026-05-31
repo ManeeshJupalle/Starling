@@ -9,6 +9,7 @@ guardrail between the model's free-form output and the orchestration loop.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -28,6 +29,11 @@ class Classification(BaseModel):
     workers: list[str] = Field(
         default_factory=list,
         description="Worker roles to fan out to for an ephemeral request.",
+    )
+    memory: Optional[str] = Field(
+        default=None,
+        description="A durable preference or fact about the user stated in this message "
+        "(short, third person), worth remembering for future requests; null if none.",
     )
 
 
