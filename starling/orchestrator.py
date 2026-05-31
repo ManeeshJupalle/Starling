@@ -10,6 +10,7 @@ the goal and persists the task graph. See ARCHITECTURE.md §2.2.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from openai import AsyncOpenAI
@@ -23,7 +24,7 @@ from . import usage
 from .llm import text_of, tool_args
 from .memory import recall_context
 from .scheduler import Scheduler
-from .schemas import Classification, Mode
+from .schemas import Classification, Mode, ScheduleSpec
 
 _CLASSIFIER_SYSTEM = (
     "You route a user's request inside a multi-agent assistant. Choose the mode and "
@@ -52,7 +53,12 @@ _CLASSIFIER_SYSTEM = (
     "'memory': if this message states a DURABLE preference or fact about the user worth "
     "remembering for future requests (e.g. 'I prefer concise answers', 'I use Python', "
     "'I'm vegetarian'), put a short third-person statement there; otherwise null. Do not "
-    "put one-off task details in memory."
+    "put one-off task details in memory.\n"
+    "'schedule': set ONLY when the user asks to set up a recurring or future task — "
+    "'every morning brief me', 'remind me daily at 8am to stretch', 'at 18:30 summarize "
+    "my day'. Fill {recurrence: 'daily'|'once', at: 'HH:MM' 24-hour}, and put the task "
+    "itself in 'goal' (e.g. goal='Give me a morning brief'). A request to do something "
+    "right now is NOT a schedule — leave it null."
 )
 
 _MERGE_SYSTEM = (
@@ -110,6 +116,11 @@ class Orchestrator:
             if classification.memory:
                 self._bb.add_memory(chat_id, classification.memory)
                 print(f"[orchestrator] remembered: {classification.memory[:60]}")
+            if classification.schedule is not None:
+                await self._channel.send(
+                    chat_id, self._create_trigger(chat_id, classification.goal, classification.schedule)
+                )
+                return
             if classification.mode == Mode.EPHEMERAL:
                 reply = await self._run_ephemeral(chat_id, classification)
             else:
@@ -212,6 +223,41 @@ class Orchestrator:
         if self._scheduler is not None:
             self._scheduler.poke()  # start executing the new tasks now
         return f"Project #{project_id} started - {len(plan.tasks)} tasks queued."
+
+    async def run_goal(self, chat_id: int, goal: str) -> None:
+        """Classify and run a goal proactively (a trigger fired it), delivering to the chat.
+
+        Like ``handle_message`` but without the awaiting-human check or schedule handling:
+        a firing trigger *executes* its goal, it does not re-schedule it. Ephemeral
+        results are sent here; project results arrive later via ``report_if_complete``.
+        """
+        try:
+            classification = await self._classify(goal)
+            print(f"[orchestrator] trigger fired -> {classification.mode.value}: {goal[:60]}")
+            if classification.mode == Mode.EPHEMERAL:
+                reply = await self._run_ephemeral(chat_id, classification)
+                await self._channel.send(chat_id, reply)
+            else:
+                await self._start_project(chat_id, classification)
+        except Exception as exc:
+            print(f"[orchestrator] trigger run error: {exc}")
+            await self._channel.send(chat_id, f"Sorry - a scheduled task hit an error: {exc}")
+
+    def _create_trigger(self, chat_id: int, goal: str, spec: ScheduleSpec) -> str:
+        """Persist a proactive trigger for ``spec`` and return a human confirmation."""
+        now = datetime.now().replace(second=0, microsecond=0)
+        try:
+            hh, mm = (int(p) for p in spec.at.strip().split(":"))
+            target = now.replace(hour=hh, minute=mm)
+        except (ValueError, TypeError):
+            target = now + timedelta(minutes=1)  # unparseable time -> fire shortly
+        if target <= now:
+            target += timedelta(days=1)  # time already passed today -> next occurrence
+        self._bb.add_trigger(chat_id, goal, spec.recurrence, target.isoformat())
+        clock = target.strftime("%H:%M")
+        when = f"every day at {clock}" if spec.recurrence == "daily" else f"at {clock} on {target:%b %d}"
+        print(f"[orchestrator] scheduled '{goal[:40]}' {when}")
+        return f"Scheduled - I'll handle \"{goal}\" {when}."
 
     async def _merge(self, goal: str, drafts: list[tuple[str, str]], memory: str = "") -> str:
         joined = "\n\n".join(f"[{role}]\n{output}" for role, output in drafts)

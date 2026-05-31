@@ -13,7 +13,8 @@ Because all state lives in the blackboard, a restart resumes in-flight projects:
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional
+from datetime import datetime, timedelta
+from typing import Any, Awaitable, Callable, Optional
 
 from openai import AsyncOpenAI
 
@@ -43,6 +44,10 @@ class Scheduler:
         self._tools_mgr = tools_manager
         self._wake = asyncio.Event()
         self._reported: set[int] = set()  # projects already reported complete
+        # Set by wiring (__main__) to the orchestrator's run_goal; lets a due trigger
+        # start a project/answer. Kept as a callback to avoid a scheduler<->orchestrator
+        # import cycle.
+        self.on_trigger: Optional[Callable[[int, str], Awaitable[None]]] = None
 
     def poke(self) -> None:
         """Ask the scheduler to run a pass as soon as possible."""
@@ -69,12 +74,40 @@ class Scheduler:
         self._wake.clear()
 
     async def tick(self) -> None:
-        """Run all currently-ready tasks; newly-unblocked tasks run on a later pass."""
+        """Fire any due triggers, then run all currently-ready tasks."""
+        await self._fire_due_triggers()
         ready = self._bb.ready_tasks()
         if not ready:
             return
         await asyncio.gather(*(self._run_one(task) for task in ready))
         self.poke()  # process newly-unblocked tasks without waiting for the heartbeat
+
+    async def _fire_due_triggers(self, now: Optional[datetime] = None) -> None:
+        """Run the goal of every trigger whose time has come, then re-arm or retire it.
+
+        The trigger is advanced/disabled *before* its goal runs, so a slow run can't let
+        the same trigger fire twice on the next heartbeat. ``now`` is injectable for tests.
+        """
+        if self.on_trigger is None:
+            return
+        now = now or datetime.now().replace(microsecond=0)
+        for trig in self._bb.due_triggers(now.isoformat()):
+            self._advance_trigger(trig, now)
+            print(f"[scheduler] firing trigger #{trig['id']} -> {trig['goal'][:50]}")
+            try:
+                await self.on_trigger(trig["chat_id"], trig["goal"])
+            except Exception as exc:
+                print(f"[scheduler] trigger #{trig['id']} failed: {exc}")
+
+    def _advance_trigger(self, trig: dict[str, Any], now: datetime) -> None:
+        """Re-arm a daily trigger for its next future firing; retire a one-shot."""
+        if trig["recurrence"] == "daily":
+            nxt = datetime.fromisoformat(trig["next_run"])
+            while nxt <= now:  # skip any missed days in one step (no burst of catch-up fires)
+                nxt += timedelta(days=1)
+            self._bb.set_trigger_next_run(trig["id"], nxt.isoformat())
+        else:
+            self._bb.disable_trigger(trig["id"])
 
     async def _run_one(self, task: dict[str, Any]) -> None:
         if task["role"] == "pm":

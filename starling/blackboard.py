@@ -60,6 +60,16 @@ CREATE TABLE IF NOT EXISTS memories (
     tags       TEXT    NOT NULL DEFAULT '[]',
     created_at TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS triggers (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    INTEGER NOT NULL,
+    goal       TEXT    NOT NULL,
+    recurrence TEXT    NOT NULL DEFAULT 'once',
+    next_run   TEXT    NOT NULL,
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -271,6 +281,49 @@ class Blackboard:
             memory["tags"] = json.loads(memory["tags"]) if memory["tags"] else []
             memories.append(memory)
         return memories
+
+    # --- triggers (proactive: scheduled + event-driven projects) -----------
+
+    def add_trigger(self, chat_id: int, goal: str, recurrence: str, next_run: str) -> int:
+        """Create a proactive trigger; ``next_run`` is an ISO timestamp. Returns its id."""
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO triggers (chat_id, goal, recurrence, next_run) VALUES (?, ?, ?, ?)",
+                (chat_id, goal, recurrence, next_run),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def due_triggers(self, now_iso: str) -> list[dict[str, Any]]:
+        """Enabled triggers whose ``next_run`` has arrived (ISO strings compare directly)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM triggers WHERE enabled = 1 AND next_run <= ? ORDER BY id",
+                (now_iso,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def all_triggers(self) -> list[dict[str, Any]]:
+        """Every trigger row, oldest first (for visibility / the dashboard)."""
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM triggers ORDER BY id").fetchall()
+        return [dict(row) for row in rows]
+
+    def set_trigger_next_run(self, trigger_id: int, next_run: str) -> None:
+        """Re-arm a recurring trigger for its next firing."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE triggers SET next_run = ? WHERE id = ?", (next_run, trigger_id)
+            )
+            self._conn.commit()
+
+    def disable_trigger(self, trigger_id: int) -> None:
+        """Switch a trigger off (a fired one-shot, or a cancelled schedule)."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE triggers SET enabled = 0 WHERE id = ?", (trigger_id,)
+            )
+            self._conn.commit()
 
     def close(self) -> None:
         """Close the underlying connection."""

@@ -47,6 +47,7 @@ def main() -> None:
     tools_manager = MCPManager()
     scheduler = Scheduler(blackboard, channel, client, config.TICK_INTERVAL, tools_manager=tools_manager)
     orchestrator = Orchestrator(channel, client, blackboard, scheduler, tools_manager=tools_manager)
+    scheduler.on_trigger = orchestrator.run_goal  # let due triggers start projects/answers
     channel.on_message(orchestrator.handle_message)
     dashboard = WebDashboard(blackboard, port=config.DASHBOARD_PORT)
 

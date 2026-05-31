@@ -9,7 +9,7 @@ guardrail between the model's free-form output and the orchestration loop.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -19,6 +19,15 @@ class Mode(str, Enum):
 
     EPHEMERAL = "ephemeral"
     PROJECT = "project"
+
+
+class ScheduleSpec(BaseModel):
+    """A proactive schedule the user asked to set up (Phase H1)."""
+
+    recurrence: Literal["once", "daily"] = Field(
+        description="'daily' to repeat every day, 'once' for a single future firing."
+    )
+    at: str = Field(description="Time of day to fire, 24-hour 'HH:MM'.")
 
 
 class Classification(BaseModel):
@@ -34,6 +43,11 @@ class Classification(BaseModel):
         default=None,
         description="A durable preference or fact about the user stated in this message "
         "(short, third person), worth remembering for future requests; null if none.",
+    )
+    schedule: Optional[ScheduleSpec] = Field(
+        default=None,
+        description="Set ONLY when the user asks to set up a recurring or future task "
+        "(e.g. 'every morning brief me'); otherwise null. 'goal' holds the task itself.",
     )
 
 
