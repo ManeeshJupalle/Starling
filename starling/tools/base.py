@@ -8,6 +8,7 @@ interface. See ARCHITECTURE.md §8.1.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
@@ -74,10 +75,25 @@ _READ_PREFIXES = (
     "query", "directory_tree",
 )
 
+# Verbs that mean a tool changes state even if its name also begins with a read prefix
+# (e.g. ``get_or_create_label``). If any name token is one of these the tool is treated
+# as sensitive. This only ever *adds* caution — it never makes a write look safe.
+_WRITE_VERBS = frozenset({
+    "create", "update", "delete", "remove", "send", "post", "write", "modify",
+    "add", "set", "move", "archive", "trash", "insert", "put", "patch", "draft",
+    "respond", "reply", "share", "invite", "cancel", "accept", "decline", "upload",
+})
+
 
 def is_read_only(tool_name: str) -> bool:
-    """Heuristic: is this tool safe to auto-run (no external state change)?"""
+    """Heuristic: is this tool safe to auto-run (no external state change)?
+
+    Read-only iff the operation starts with a read prefix AND none of its name tokens is
+    a write verb. The write-verb guard catches names that read as safe but mutate.
+    """
     op = tool_name.split("__", 1)[-1].lower()
+    if any(token in _WRITE_VERBS for token in re.split(r"[_\-]+", op)):
+        return False
     return op.startswith(_READ_PREFIXES)
 
 

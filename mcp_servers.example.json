@@ -28,7 +28,11 @@
     "slack": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-slack"],
-      "env": { "SLACK_BOT_TOKEN": "xoxb-your-bot-token", "SLACK_TEAM_ID": "T0000000" }
+      "env": { "SLACK_BOT_TOKEN": "xoxb-your-bot-token", "SLACK_TEAM_ID": "T0000000" },
+      "read_only_tools": [
+        "slack_list_channels", "slack_get_channel_history",
+        "slack_get_thread_replies", "slack_get_users", "slack_get_user_profile"
+      ]
     }
   }
 }

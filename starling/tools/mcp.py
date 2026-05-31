@@ -66,9 +66,11 @@ class MCPManager:
         await session.initialize()
         self._sessions[name] = session
         read_only = bool(spec.get("read_only", False))  # per-server "trust as safe" override
+        safe_tools = set(spec.get("read_only_tools", []))  # specific tools to trust as safe
         tools_result = await session.list_tools()
         for mcp_tool in tools_result.tools:
-            tool = self._wrap(name, session, mcp_tool, read_only)
+            force_safe = read_only or mcp_tool.name in safe_tools
+            tool = self._wrap(name, session, mcp_tool, force_safe)
             self._tools[tool.name] = tool
         print(f"[mcp] connected '{name}': {len(tools_result.tools)} tools")
 
