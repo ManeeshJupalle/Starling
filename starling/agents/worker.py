@@ -94,6 +94,7 @@ async def run_task(
         # The model asked to use tools: record its turn, run them, feed results back.
         messages.append(_assistant_turn(message))
         for tc in message.tool_calls:
+            print(f"[worker:{role}] tool {tc.function.name} {(tc.function.arguments or '')[:80]}")
             try:
                 args = json.loads(tc.function.arguments or "{}")
                 result = await tools.call(tc.function.name, args)

@@ -16,7 +16,7 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from .base import Tool, ToolRegistry, is_sensitive
+from .base import Tool, ToolRegistry, is_read_only
 
 DEFAULT_CONFIG_PATH = "mcp_servers.json"
 
@@ -39,14 +39,22 @@ class MCPManager:
         self._sessions: dict[str, ClientSession] = {}
         self._tools: dict[str, Tool] = {}
 
-    async def start(self) -> None:
-        """Connect every server in the config and discover its tools."""
-        with open(self._config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
+    async def start(self, config: dict[str, Any] | None = None) -> None:
+        """Connect every server in the config and discover its tools.
+
+        One server failing to connect (e.g. a missing token) is logged and skipped, so
+        it never takes down the others.
+        """
+        if config is None:
+            with open(self._config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
         for name, spec in config.get("mcpServers", {}).items():
             if name.startswith("_"):  # skip example/commented entries
                 continue
-            await self._connect(name, spec)
+            try:
+                await self._connect(name, spec)
+            except Exception as exc:
+                print(f"[mcp] failed to connect '{name}': {exc}")
 
     async def _connect(self, name: str, spec: dict[str, Any]) -> None:
         env = {**os.environ, **spec["env"]} if spec.get("env") else None
@@ -88,7 +96,7 @@ class MCPManager:
         for tool in self._tools.values():
             if tool.name.split("__", 1)[0] not in servers:
                 continue
-            if not include_sensitive and is_sensitive(tool.name):
+            if not include_sensitive and not is_read_only(tool.name):
                 continue
             registry.add(tool)
         return registry

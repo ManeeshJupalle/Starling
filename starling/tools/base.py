@@ -59,15 +59,17 @@ class ToolRegistry:
         return await tool.call(args)
 
 
-# Verbs that mark a tool as state-changing / sensitive — these need human approval
-# (Phase B). Until then, only read-only tools are exposed to workers.
-_SENSITIVE_HINTS = (
-    "create", "update", "delete", "write", "edit", "move", "remove",
-    "rename", "send", "push", "append", "insert", "upload", "merge",
+# Read-only prefixes — only tools whose operation starts with one of these are exposed
+# to workers until the approval layer (Phase B) can gate state-changing actions. This is
+# default-deny: writes (create/update/delete/push/fork/merge/...) stay out by omission,
+# which is safer than trying to enumerate every write verb.
+_READ_PREFIXES = (
+    "get", "list", "search", "read", "fetch", "find", "describe", "show",
+    "query", "directory_tree",
 )
 
 
-def is_sensitive(tool_name: str) -> bool:
-    """Heuristic: does this tool change external state (and thus need approval)?"""
+def is_read_only(tool_name: str) -> bool:
+    """Heuristic: is this tool safe to auto-run (no external state change)?"""
     op = tool_name.split("__", 1)[-1].lower()
-    return any(hint in op for hint in _SENSITIVE_HINTS)
+    return op.startswith(_READ_PREFIXES)
