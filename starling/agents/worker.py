@@ -10,15 +10,23 @@ collapses to a single call -> text. See ARCHITECTURE.md §2.5, §8.3, §8.5.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from openai import AsyncOpenAI
 
+from .. import usage
 from ..llm import make_client, text_of
 from ..tools.base import ToolRegistry, is_read_only
 from .roles import ROLE_PROMPTS, active_model
+
+# Tool reliability (Phase F): bound each tool call, and retry transient failures of
+# read-only tools — never blindly retry a state-changing action.
+TOOL_TIMEOUT = 30.0
+TOOL_RETRIES = 2
+TOOL_BACKOFF = 0.5
 
 _client: Optional[AsyncOpenAI] = None
 
@@ -64,11 +72,32 @@ def _norm_call(tc: Any) -> dict[str, Any]:
     return {"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments or "{}"}
 
 
-async def _safe_call(tools: ToolRegistry, call: dict[str, Any]) -> str:
+async def _safe_call(
+    tools: ToolRegistry,
+    call: dict[str, Any],
+    *,
+    timeout: float = TOOL_TIMEOUT,
+    retries: int = TOOL_RETRIES,
+    base_delay: float = TOOL_BACKOFF,
+) -> str:
+    """Run a tool with a timeout; retry transient failures of read-only tools."""
+    name = call["name"]
     try:
-        return await tools.call(call["name"], json.loads(call["arguments"] or "{}"))
-    except Exception as exc:  # surface tool failures back to the model
-        return f"error: {exc}"
+        args = json.loads(call["arguments"] or "{}")
+    except Exception as exc:
+        return f"error: invalid arguments for {name}: {exc}"
+    safe = tools.is_safe(name) if tools is not None else True
+    attempts = retries + 1 if safe else 1  # don't retry state-changing actions
+    last: Optional[Exception] = None
+    for i in range(attempts):
+        try:
+            return await asyncio.wait_for(tools.call(name, args), timeout=timeout)
+        except Exception as exc:  # transient error or timeout
+            last = exc
+            if i < attempts - 1:
+                print(f"[worker] tool {name} failed (attempt {i + 1}/{attempts}): {exc}; retrying")
+                await asyncio.sleep(base_delay * (2 ** i))
+    return f"error: {name} failed after {attempts} attempt(s): {last}"
 
 
 async def _answer_calls(messages, calls, tools, allow_sensitive, role) -> Optional[WorkerResult]:
@@ -96,6 +125,7 @@ async def _loop(messages, *, client, tools, allow_sensitive, role, max_tokens, m
         if tools:
             kwargs["tools"] = tools.openai_defs()
         resp = await client.chat.completions.create(**kwargs)
+        usage.record(resp)
         message = resp.choices[0].message
         if not getattr(message, "tool_calls", None):
             return WorkerResult(done=True, output=text_of(resp))

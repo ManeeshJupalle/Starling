@@ -19,6 +19,7 @@ from .agents.roles import WORKER_ROLES, active_model, tools_for_role
 from .agents.worker import resume_task, run_task
 from .blackboard import Blackboard, TaskStatus
 from .channels.base import Channel
+from . import usage
 from .llm import text_of, tool_args
 from .memory import recall_context
 from .scheduler import Scheduler
@@ -169,6 +170,7 @@ class Orchestrator:
             tools=[_CLASSIFY_TOOL],
             tool_choice={"type": "function", "function": {"name": "classify_request"}},
         )
+        usage.record(resp)
         return Classification.model_validate(tool_args(resp))
 
     async def _run_ephemeral(self, chat_id: int, classification: Classification) -> str:
@@ -220,4 +222,5 @@ class Orchestrator:
                 {"role": "user", "content": f"User request:\n{goal}\n\nWorker drafts:\n{joined}"},
             ],
         )
+        usage.record(resp)
         return text_of(resp)

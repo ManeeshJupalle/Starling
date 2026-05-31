@@ -14,6 +14,7 @@ from typing import Optional
 
 from openai import AsyncOpenAI
 
+from .. import usage
 from ..llm import make_client, tool_args
 from ..schemas import PlannedTask, ProjectPlan
 from .roles import PLAN_ROLES, ROLE_PROMPTS, active_model
@@ -165,5 +166,6 @@ async def decompose(goal: str, *, client: Optional[AsyncOpenAI] = None) -> Proje
         tools=[_PLAN_TOOL],
         tool_choice={"type": "function", "function": {"name": "submit_plan"}},
     )
+    usage.record(resp)
     plan = ProjectPlan.model_validate(tool_args(resp))  # Pydantic guard
     return _validate_plan(plan)  # semantic repair / reject

@@ -20,6 +20,7 @@ from openai import AsyncOpenAI
 from .agents.roles import tools_for_role
 from .agents.worker import run_task
 from .blackboard import Blackboard, TaskStatus
+from . import usage
 from .channels.base import Channel
 from .memory import recall_context
 
@@ -175,5 +176,5 @@ class Scheduler:
         ]
         result = "\n\n".join(t["output"] for t in sinks if t["output"]) or "(no output)"
         self._reported.add(project_id)
-        print(f"[scheduler] project #{project_id} complete")
+        print(f"[scheduler] project #{project_id} complete  |  usage: {usage.snapshot()}")
         await self._channel.send(project["chat_id"], f"Project #{project_id} complete:\n\n{result}")

@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 from aiohttp import web
 
+from .. import usage
 from ..blackboard import Blackboard
 
 
@@ -51,7 +52,8 @@ class WebDashboard:
                     "tasks": [_task_view(t) for t in self._bb.project_tasks(project["id"])],
                 }
                 for project in self._bb.all_projects()
-            ]
+            ],
+            "usage": usage.snapshot(),
         }
 
     async def start(self) -> None:
@@ -137,6 +139,7 @@ _HTML = """<!doctype html>
 <header>
   <h1>Starling</h1>
   <span class="sub">live task graph</span>
+  <span id="usage" class="sub"></span>
   <span id="conn"><span id="dot"></span><span id="connlabel">connecting…</span></span>
 </header>
 <main id="root"><div class="empty">No projects yet. Start one from Telegram and watch it run here.</div></main>
@@ -144,9 +147,14 @@ _HTML = """<!doctype html>
   const root = document.getElementById('root');
   const dot = document.getElementById('dot');
   const connlabel = document.getElementById('connlabel');
+  const usageEl = document.getElementById('usage');
   const esc = (s) => (s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 
   function render(state) {
+    const u = state.usage || {};
+    usageEl.textContent = u.calls
+      ? `· ${u.calls} calls · ${((u.input_tokens||0)+(u.output_tokens||0)).toLocaleString()} tokens · ~$${u.est_cost_usd}`
+      : '';
     const projects = state.projects || [];
     if (!projects.length) {
       root.innerHTML = '<div class="empty">No projects yet. Start one from Telegram and watch it run here.</div>';
