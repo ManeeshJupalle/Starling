@@ -38,3 +38,6 @@ TELEGRAM_BOT_TOKEN: str = _require("TELEGRAM_BOT_TOKEN")
 
 # Scheduler heartbeat in seconds — optional, defaults to 5.
 TICK_INTERVAL: int = int(os.environ.get("TICK_INTERVAL", "5"))
+
+# Live web dashboard port — optional, defaults to 8000.
+DASHBOARD_PORT: int = int(os.environ.get("DASHBOARD_PORT", "8000"))

@@ -100,6 +100,12 @@ class Blackboard:
             ).fetchone()
         return dict(row) if row else None
 
+    def all_projects(self) -> list[dict[str, Any]]:
+        """Return every project row, oldest first (for the dashboard)."""
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM projects ORDER BY id").fetchall()
+        return [dict(row) for row in rows]
+
     # --- tasks -------------------------------------------------------------
 
     def add_task(

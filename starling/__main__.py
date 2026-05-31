@@ -15,6 +15,7 @@ import sys
 
 from .blackboard import DEFAULT_DB_PATH, Blackboard
 from .channels.telegram import TelegramChannel
+from .channels.web import WebDashboard
 from .llm import make_client
 from .orchestrator import Orchestrator
 from .scheduler import Scheduler
@@ -47,16 +48,22 @@ def main() -> None:
     scheduler = Scheduler(blackboard, channel, client, config.TICK_INTERVAL, tools_manager=tools_manager)
     orchestrator = Orchestrator(channel, client, blackboard, scheduler, tools_manager=tools_manager)
     channel.on_message(orchestrator.handle_message)
+    dashboard = WebDashboard(blackboard, port=config.DASHBOARD_PORT)
 
     async def _startup() -> None:
-        # Connect MCP servers first (so tools are ready), then run the scheduler loop.
+        # Connect MCP servers, start the dashboard, then run the scheduler loop. Tools
+        # and the dashboard are best-effort; the bot still runs if either fails.
         try:
             await tools_manager.start()
-        except Exception as exc:  # tools are best-effort; the bot still runs without them
+        except Exception as exc:
             print(f"[mcp] startup failed (continuing without tools): {exc}")
+        try:
+            await dashboard.start()
+        except Exception as exc:
+            print(f"[web] dashboard failed to start: {exc}")
         await scheduler.run()
 
-    print("Starling running (MCP tools + project mode, scheduler active). Ctrl+C to stop.")
+    print("Starling running (MCP tools + project mode + web dashboard). Ctrl+C to stop.")
     channel.run(on_start=_startup)
 
 
