@@ -155,24 +155,33 @@ inputs(json), output(json?), question?, created_at, updated_at`
 
 ---
 
-## 6. Suggested module layout
+## 6. Module layout (as built)
 
 ```
 starling/
   __init__.py
   __main__.py            # wiring + entrypoint
-  config.py              # env: ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, tick interval
-  blackboard.py          # SQLite store + TaskStatus enum
+  config.py              # env: LLM_* (OpenAI-compatible), TELEGRAM_BOT_TOKEN, TICK_INTERVAL, DASHBOARD_PORT
+  llm.py                 # OpenAI-compatible client factory + response helpers (§1 stack)
+  blackboard.py          # SQLite store + TaskStatus enum; projects, tasks (status/deps/checkpoint), memories
   schemas.py             # Pydantic: Classification, PlannedTask, ProjectPlan
-  orchestrator.py        # classify, route, handle human replies
-  scheduler.py           # heartbeat + ready-task dispatch
+  orchestrator.py        # classify, route, handle human replies + tool approvals
+  scheduler.py           # heartbeat + ready-task dispatch; pause for approval
+  memory.py              # recall user context for prompt injection (§8)
+  usage.py               # token + rough cost tracking (§8)
   channels/
     base.py              # Channel interface
     telegram.py          # Telegram adapter
+    web.py               # live web dashboard (aiohttp + SSE) (§8)
   agents/
-    roles.py             # role -> system prompt (+ model)
-    worker.py            # run_task(role, description, inputs) -> str
+    roles.py             # role -> system prompt; per-role MCP tool grants
+    worker.py            # run_task / resume_task — agentic tool loop, pauses for approval (§8)
     pm.py                # decompose(goal) -> ProjectPlan
+  tools/                 # §8 — the tool layer
+    base.py              # Tool, ToolRegistry, read-only safety check
+    mcp.py               # MCPManager: connect MCP servers, wrap their tools
+    builtin.py           # a built-in tool
+mcp_servers.json         # which MCP servers to launch (gitignored if it holds tokens)
 ```
 
 ---
@@ -187,14 +196,15 @@ starling/
 
 ## 8. Evolution: tool-using agents (Starling-Claw)
 
-v1 (§1–§7) coordinates agents that only emit **text**. The next direction —
-*Starling-Claw* — keeps the entire coordination engine and upgrades the **workers**
-from text generators into **tool-using agents that act**: read your files, calendar,
-email, and repos (and later write to them) via the **Model Context Protocol (MCP)**.
+v1 (§1–§7) coordinates agents that only emit **text**. *Starling-Claw* — **built, in
+phases A–F** — keeps the entire coordination engine and upgrades the **workers** from
+text generators into **tool-using agents that act**: read your files, repos, and the
+web (and write to them, behind approval) via the **Model Context Protocol (MCP)**, with
+per-user memory, a live web dashboard, and cost tracking.
 
-The phased, build-ready plan lives in **`Starling-claw-prompts.md`**; this section is
-the design context those prompts reference. We evolve the existing code in place —
-nothing in §1–§6 is replaced; only the worker grows a loop and a tool layer is added.
+The phased build lives in **`Starling-claw-prompts.md`**; this section is the design.
+The engine in §1–§6 was evolved in place — nothing was replaced; the worker grew a loop
+and a tool layer was added. The sub-sections below are all implemented.
 
 **Thesis shift:** from *coordinated text* to *coordinated action*. The coordination
 layer (orchestrator, blackboard, scheduler, PM decomposition, human-in-the-loop) is

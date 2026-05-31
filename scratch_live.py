@@ -33,8 +33,8 @@ async def main() -> None:
 
     print("\n[1] worker completion ...")
     try:
-        out = await run_task("summarizer", "Reply with exactly: hello from starling", client=client)
-        print(f"    OK -> {out!r}")
+        result = await run_task("summarizer", "Reply with exactly: hello from starling", client=client)
+        print(f"    OK -> {result.output!r}")
     except Exception as exc:
         print(f"    FAILED -> {type(exc).__name__}: {exc}")
         return

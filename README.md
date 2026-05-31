@@ -15,12 +15,19 @@ orchestration loop — routing, task decomposition, dependency scheduling, share
 state, crash recovery, human-in-the-loop — is hand-rolled on purpose. That
 coordination layer *is* the project.
 
+And the agents now **act**: they use tools over the [Model Context Protocol
+(MCP)](https://modelcontextprotocol.io) to read your files, repos, and the web — and
+to *write*, but only after you approve. Starling remembers your preferences, tracks
+token cost, and ships a live web dashboard so you can watch the flock work. See
+[Tool-using agents](#tool-using-agents-starling-claw).
+
 ---
 
 ## Table of contents
 
 - [What it does](#what-it-does)
 - [See it in action](#see-it-in-action)
+- [Tool-using agents (Starling-Claw)](#tool-using-agents-starling-claw)
 - [Architecture](#architecture)
 - [How a message is handled](#how-a-message-is-handled)
 - [Task lifecycle](#task-lifecycle)
@@ -101,6 +108,32 @@ Starling: Project #1 complete:
 
 Your `"Paris"` reply is routed to the paused task, stored as its output, and fed to
 the downstream tasks that depend on it.
+
+---
+
+## Tool-using agents (Starling-Claw)
+
+Beyond coordinating *text*, Starling's workers coordinate *action*. A worker runs an
+**agentic tool loop** — the model calls tools, they execute, results feed back, until
+it answers — and tools come from **MCP servers**, so dozens of pre-built integrations
+plug in through config alone.
+
+| Capability | How |
+|---|---|
+| **Read your stuff** | MCP servers (filesystem, GitHub, web search) exposed per worker role |
+| **Take actions — safely** | writes/sends are *sensitive*: the worker **pauses and asks you to approve**, reusing the same human-in-the-loop primitive; reads auto-run |
+| **Remember you** | durable preferences captured from your messages and recalled into context on later, unrelated requests |
+| **Watch it work** | a live web dashboard streaming the task graph as it executes (SSE) |
+| **Stay reliable & cheap** | per-tool timeouts, retries for reads (never blind-retrying a write), and visible token/cost tracking |
+
+**Safety model.** Tools are read-only by default (a name allowlist; a whole server can
+be trusted with `"read_only": true`). Anything that changes state is gated behind your
+approval — and the approval pause **checkpoints the worker's state to the blackboard**,
+so it survives a restart like everything else.
+
+**Adding an integration is config, not code** — drop an MCP server into
+`mcp_servers.json` and grant it to a role. The same approval gate covers it
+automatically. See [ARCHITECTURE.md §8](ARCHITECTURE.md) for the design.
 
 ---
 
@@ -233,28 +266,38 @@ pending ──▶ ready ──▶ running ──▶ done
 
 ```
 starling/
-  __main__.py        # entrypoint: wires channel + client + blackboard + scheduler + orchestrator
-  config.py          # env config: LLM_API_KEY/LLM_BASE_URL/LLM_MODEL, TELEGRAM_BOT_TOKEN, TICK_INTERVAL
-  blackboard.py      # SQLite store + TaskStatus enum; projects/tasks tables and all state methods
+  __main__.py        # entrypoint: wires channel + client + blackboard + scheduler + orchestrator + tools + dashboard
+  config.py          # env config: LLM_*, TELEGRAM_BOT_TOKEN, TICK_INTERVAL, DASHBOARD_PORT
+  llm.py             # OpenAI-compatible client factory + response helpers
+  blackboard.py      # SQLite store: projects, tasks (status/deps/checkpoint), memories
   schemas.py         # Pydantic models: Mode, Classification, PlannedTask, ProjectPlan
-  orchestrator.py    # classify, route, ephemeral fan-out/merge, start project, route human replies
-  scheduler.py       # heartbeat + poke; ready-task dispatch, inputs, resume, terminal reporting, pause
+  orchestrator.py    # classify, route, ephemeral fan-out/merge, start project, route human replies + approvals
+  scheduler.py       # heartbeat + poke; ready-task dispatch, inputs, resume, reporting, pause/approval
+  memory.py          # recall user context for prompt injection
+  usage.py           # token + rough cost tracking
   channels/
-    base.py          # Channel interface (on_message, send, run + on_start hook) — zero orchestration
+    base.py          # Channel interface (on_message, send, run + on_start hook)
     telegram.py      # Telegram adapter (python-telegram-bot, v20+ async)
+    web.py           # live web dashboard (aiohttp + SSE)
   agents/
-    roles.py         # role -> system prompt, DEFAULT_MODEL, WORKER_ROLES / PLAN_ROLES
-    worker.py        # run_task(role, description, inputs) -> str  (stateless model call)
+    roles.py         # role -> system prompt + per-role MCP tool grants
+    worker.py        # run_task / resume_task — agentic tool loop, pauses for approval
     pm.py            # decompose(goal) -> ProjectPlan  (constrained, validated, acyclic)
+  tools/
+    base.py          # Tool + ToolRegistry + the read-only safety check
+    mcp.py           # MCPManager: connect MCP servers, wrap their tools
+    builtin.py       # a tiny built-in tool
 
-scratch_phase1.py ... scratch_phase6.py   # offline verification scripts (no API key needed)
-ARCHITECTURE.md                            # the design source of truth
+scratch_phase1.py … scratch_phase6.py     # offline verification of the orchestrator
+scratch_claw_a1.py … scratch_claw_f.py    # offline verification of the tool-using layer
+mcp_servers.example.json                   # MCP server config template
+ARCHITECTURE.md                            # the design source of truth (see §8 for tools)
 ```
 
 The interesting code to read first: [orchestrator.py](starling/orchestrator.py)
-(routing + the human-reply check), [scheduler.py](starling/scheduler.py) (the
-dependency-driven execution loop), and [agents/pm.py](starling/agents/pm.py) (graph
-decomposition, validation, and topological insertion).
+(routing + the reply/approval check), [scheduler.py](starling/scheduler.py) (the
+dependency-driven execution loop), [agents/worker.py](starling/agents/worker.py) (the
+pause/resume tool loop), and [tools/mcp.py](starling/tools/mcp.py) (the MCP client).
 
 ---
 
@@ -327,6 +370,15 @@ Then message your bot on Telegram. Try one of each mode:
   project that runs to completion and posts the result.
 - *"plan a weekend itinerary, but ask me which city first"* → a project that pauses,
   asks, and resumes on your reply.
+
+Open **http://localhost:8000** to watch the live dashboard — tasks flip through
+ready → running → done in real time, a task turns purple when it pauses for your
+approval, and the header shows running token cost.
+
+To give agents tools, copy `mcp_servers.example.json` to `mcp_servers.json` (gitignored)
+and fill in keys: the **filesystem** server (scoped to `workspace/`) needs none; **GitHub**
+needs a token; **web search** needs a free Brave key. Then ask the researcher to *"read
+the README in my workspace"* or, with a write tool configured, watch it pause for approval.
 
 State persists in `starling.db` (a local SQLite file, gitignored). Kill the process
 mid-project and relaunch — it resumes from the blackboard without redoing completed
@@ -403,22 +455,35 @@ own. All six are complete.
 | 5     | Scheduler — heartbeat, dependency resolution, crash resume   |   ✅   |
 | 6     | Human-in-the-loop — pause, ask in channel, resume on reply   |   ✅   |
 
+Then **Starling-Claw** evolved the workers from *text* into *action*:
+
+| Phase  | Deliverable                                                  | Status |
+| ------ | ------------------------------------------------------------ | :----: |
+| A1–A4  | Agentic tool loop + MCP servers (filesystem, GitHub, web), read-only |   ✅   |
+| B      | Sensitive actions gated by human approval (checkpoint + resume) |   ✅   |
+| C      | Per-user memory — capture preferences, recall into context   |   ✅   |
+| D      | Web tools + per-server `read_only` override                  |   ✅   |
+| E      | Live web dashboard (SSE task-graph view)                     |   ✅   |
+| F      | Reliability — tool retries/timeouts + token-cost tracking    |   ✅   |
+
 See [CLAUDE_CODE_PROMPTS.md](CLAUDE_CODE_PROMPTS.md) for the per-phase build spec and
-[ARCHITECTURE.md](ARCHITECTURE.md) for the design source of truth.
+[ARCHITECTURE.md](ARCHITECTURE.md) (§8 for the tool-using layer) for the design.
 
 ---
 
 ## Out of scope / future work
 
-The architecture is ready for these; they're deliberately not built in v1, to keep
-the focus on the coordination layer:
+The architecture is ready for these; they're deliberately not built, to keep the
+focus sharp:
 
+- **Web *chat* channel** — the dashboard is read-only today; a chat-from-web channel
+  is a small follow-up (it needs per-message reply routing).
 - **Discord / other channels** — implement the same `Channel` interface.
 - **Model-per-role mixing** — a one-line swap (see the commented hook in
   [roles.py](starling/agents/roles.py)).
-- **Multi-node / concurrent scheduler workers** — v1 is single-node by design.
+- **Embedding-based memory recall** — memory recall is recency-based today.
+- **Multi-node / concurrent scheduler workers** — single-node by design.
 - **Auth / multi-tenant** — single-user assistant by design.
-- **Failure recovery beyond requeue** — retries / backoff for failed tasks.
 
 ---
 
@@ -432,6 +497,8 @@ the focus on the coordination layer:
   Telegram channel
 - **stdlib `sqlite3`** — the durable blackboard
 - **[pydantic](https://docs.pydantic.dev/)** — validation of every LLM control-flow output
+- **[mcp](https://pypi.org/project/mcp/)** — Model Context Protocol client, for tool servers
+- **[aiohttp](https://pypi.org/project/aiohttp/)** — the live web dashboard (SSE)
 - **[python-dotenv](https://pypi.org/project/python-dotenv/)** — loads secrets from `.env`
 
 No agent framework — by design.
