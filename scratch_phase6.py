@@ -1,21 +1,18 @@
 """Scratch verification for Phase 6 (human-in-the-loop).
 
-Runs a project containing a decision point end-to-end with a fake Anthropic client
-and a real file-backed blackboard, so no API key or Telegram token is needed. Covers:
-the PM emitting a 'pm' question task, the scheduler pausing it (awaiting_human + ask),
-the orchestrator routing the next reply to the waiting task (not classifying it as a
-new request), the answer flowing to downstream tasks, and the project finishing.
-
-The live check (start a decision-point project via Telegram, reply, watch it resume)
-is run separately with real keys via ``python -m starling``.
+Runs a project containing a decision point end-to-end with a fake OpenAI-compatible
+client and a real file-backed blackboard, so no API key or Telegram token is needed.
+Covers: the PM emitting a 'pm' question task, the scheduler pausing it (awaiting_human
++ ask), the orchestrator routing the next reply to the waiting task (not classifying
+it as a new request), the answer flowing to downstream tasks, and the project finishing.
 """
 
 import asyncio
 import os
 
+from scratch_fakes import FakeChannel, chat, system_of, text_response, tool_name, tool_response, user_of
 from starling.agents.roles import ROLE_PROMPTS
 from starling.blackboard import Blackboard, TaskStatus
-from starling.channels.base import Channel, InboundHandler
 from starling.orchestrator import Orchestrator
 from starling.scheduler import Scheduler
 
@@ -31,69 +28,28 @@ PLAN = {"tasks": [
 ]}
 
 
-# --- fakes ----------------------------------------------------------------
-
-class FakeChannel(Channel):
-    def __init__(self) -> None:
-        self._handler: InboundHandler | None = None
-        self.sent: list[tuple[int, str]] = []
-
-    def on_message(self, handler: InboundHandler) -> None:
-        self._handler = handler
-
-    async def send(self, chat_id: int, text: str) -> None:
-        self.sent.append((chat_id, text))
-
-    def run(self, on_start=None) -> None:
-        raise NotImplementedError
-
-    def texts(self) -> list[str]:
-        return [t for _, t in self.sent]
-
-
-class _Block:
-    def __init__(self, type: str, text: str | None = None, input: dict | None = None) -> None:
-        self.type = type
-        self.text = text
-        self.input = input
-
-
-class _Resp:
-    def __init__(self, content: list[_Block]) -> None:
-        self.content = content
-
-
-class _Messages:
-    def __init__(self, client: "FakeClient") -> None:
-        self._client = client
-
-    async def create(self, **kw):
-        return await self._client._create(**kw)
-
-
 class FakeClient:
     def __init__(self) -> None:
-        self.messages = _Messages(self)
-        self.calls: list[str] = []                  # classify | decompose
+        self.chat = chat(self._create)
+        self.calls: list[str] = []                       # classify | decompose
         self.worker_prompts: list[tuple[str, str]] = []  # (role, user)
 
     async def _create(self, **kw):
-        tools = kw.get("tools") or []
-        name = tools[0]["name"] if tools else ""
+        name = tool_name(kw)
         if name == "classify_request":
             self.calls.append("classify")
-            return _Resp([_Block("tool_use", input=CLASSIFICATION)])
+            return tool_response("classify_request", CLASSIFICATION)
         if name == "submit_plan":
             self.calls.append("decompose")
-            return _Resp([_Block("tool_use", input=PLAN)])
-        role = _SYS_TO_ROLE.get(kw["system"], "?")
-        user = kw["messages"][0]["content"]
+            return tool_response("submit_plan", PLAN)
+        role = _SYS_TO_ROLE.get(system_of(kw), "?")
+        user = user_of(kw)
         self.worker_prompts.append((role, user))
         if role == "researcher":
-            return _Resp([_Block("text", text=f"RDATA({user})")])
+            return text_response(f"RDATA({user})")
         if role == "summarizer":
-            return _Resp([_Block("text", text="ITINERARY")])
-        return _Resp([_Block("text", text="X")])
+            return text_response("ITINERARY")
+        return text_response("X")
 
     def classify_count(self) -> int:
         return self.calls.count("classify")
@@ -123,10 +79,10 @@ async def main() -> None:
     client = FakeClient()
     sched = Scheduler(bb, channel, client, tick_interval=0.01)
     orch = Orchestrator(channel, client, bb, sched)
-    chat = 7
+    chat_id = 7
 
     print("1. user starts a project with a decision point:")
-    await orch.handle_message(chat, "plan me a weekend trip")
+    await orch.handle_message(chat_id, "plan me a weekend trip")
     pid = 1
     check("project created with 3 tasks", len(bb.project_tasks(pid)) == 3)
     check("classified once (no paused task yet)", client.classify_count() == 1)
@@ -140,10 +96,10 @@ async def main() -> None:
     check("question asked in the chat", QUESTION in channel.texts())
     check("no workers run while paused", client.worker_count("researcher") == 0)
     check("blackboard reports the paused task for this chat",
-          bb.awaiting_human(chat) is not None and bb.awaiting_human(chat)["id"] == 1)
+          bb.awaiting_human(chat_id) is not None and bb.awaiting_human(chat_id)["id"] == 1)
 
     print("\n3. user's reply is routed to the waiting task (not a new request):")
-    await orch.handle_message(chat, "Paris")
+    await orch.handle_message(chat_id, "Paris")
     check("NO new classification for the reply", client.classify_count() == 1)
     pm_task = bb.get_task(1)
     check("pm task now done", pm_task["status"] == TaskStatus.DONE)
@@ -159,6 +115,21 @@ async def main() -> None:
     research_prompt = next(u for r, u in client.worker_prompts if r == "researcher")
     check("researcher received the human's answer (Paris)", "Paris" in research_prompt)
     check("final itinerary posted to the chat", any("ITINERARY" in t for t in channel.texts()))
+    bb.close()
+
+    print("\nregression: a pending decision blocks project completion:")
+    if os.path.exists(DB):
+        os.remove(DB)
+    bb = Blackboard(DB)
+    channel = FakeChannel()
+    sched = Scheduler(bb, channel, FakeClient(), tick_interval=0.01)
+    pid2 = bb.create_project(7, "g")
+    q = bb.add_task("pm", "Which city?", project_id=pid2)            # decision, no deps
+    bb.add_task("researcher", "an unrelated sink", project_id=pid2)  # sink that ignores the decision
+    await sched.tick()  # pm -> awaiting_human; the researcher runs to done
+    check("decision is awaiting_human", bb.get_task(q)["status"] == TaskStatus.AWAITING_HUMAN)
+    check("no 'complete' posted while the decision is pending",
+          not any("complete" in t.lower() for t in channel.texts()))
     bb.close()
 
     if os.path.exists(DB):

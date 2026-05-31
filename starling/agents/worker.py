@@ -10,19 +10,20 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 
-from .roles import DEFAULT_MODEL, ROLE_PROMPTS
+from ..llm import make_client, text_of
+from .roles import ROLE_PROMPTS, active_model
 
 # Lazily-created shared client so importing this module needs no API key (e.g. for
 # tests). Callers may inject their own client; the orchestrator passes one in.
-_client: Optional[AsyncAnthropic] = None
+_client: Optional[AsyncOpenAI] = None
 
 
-def _get_client() -> AsyncAnthropic:
+def _get_client() -> AsyncOpenAI:
     global _client
     if _client is None:
-        _client = AsyncAnthropic()  # reads ANTHROPIC_API_KEY from the environment
+        _client = make_client()  # reads LLM_API_KEY / LLM_BASE_URL from the environment
     return _client
 
 
@@ -37,17 +38,19 @@ async def run_task(
     description: str,
     inputs: Optional[dict[str, Any]] = None,
     *,
-    client: Optional[AsyncAnthropic] = None,
+    client: Optional[AsyncOpenAI] = None,
     max_tokens: int = 1024,
 ) -> str:
     """Run one task for ``role`` and return the model's text output."""
     if role not in ROLE_PROMPTS:
         raise ValueError(f"unknown role: {role!r}")
     client = client or _get_client()
-    resp = await client.messages.create(
-        model=DEFAULT_MODEL,
+    resp = await client.chat.completions.create(
+        model=active_model(),
         max_tokens=max_tokens,
-        system=ROLE_PROMPTS[role],
-        messages=[{"role": "user", "content": _build_user_prompt(description, inputs or {})}],
+        messages=[
+            {"role": "system", "content": ROLE_PROMPTS[role]},
+            {"role": "user", "content": _build_user_prompt(description, inputs or {})},
+        ],
     )
-    return "".join(block.text for block in resp.content if block.type == "text").strip()
+    return text_of(resp)

@@ -6,7 +6,16 @@ stateless; their behaviour is entirely defined by the system prompt selected her
 
 from __future__ import annotations
 
-DEFAULT_MODEL = "claude-sonnet-4-6"
+import os
+
+# Default model id (provider-agnostic). Override per-run with the LLM_MODEL env var.
+DEFAULT_MODEL = "openai/gpt-4o-mini"
+
+
+def active_model() -> str:
+    """The model id to use, resolved at call time so .env overrides take effect."""
+    return os.environ.get("LLM_MODEL") or DEFAULT_MODEL
+
 
 ROLE_PROMPTS: dict[str, str] = {
     "researcher": (
@@ -40,5 +49,5 @@ WORKER_ROLES: tuple[str, ...] = ("researcher", "summarizer", "coder")
 PLAN_ROLES: tuple[str, ...] = WORKER_ROLES + ("pm",)
 
 # Model-per-role would plug in here: map a role to its own model and have
-# worker.run_task look it up, falling back to DEFAULT_MODEL. Documented, not built (v1).
-#   ROLE_MODELS = {"coder": "claude-opus-4-8", "summarizer": "claude-haiku-4-5-20251001"}
+# worker.run_task / active_model look it up, falling back to DEFAULT_MODEL.
+#   ROLE_MODELS = {"coder": "openai/gpt-4o", "summarizer": "groq/llama-3.1-8b-instant"}

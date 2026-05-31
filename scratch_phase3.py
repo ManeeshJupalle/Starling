@@ -1,12 +1,9 @@
 """Scratch verification for Phase 3 (ephemeral mode: classify -> fan-out -> merge).
 
-Runs the orchestrator end-to-end with a fake Channel and a fake Anthropic client, so
-no API key or Telegram token is needed. Covers: schema validation, multi-worker
-parallel fan-out + merge, single-worker short-circuit, unknown-worker filtering,
-project-mode placeholder, and the Pydantic guard rejecting a bad classification.
-
-The live check ("summarize SQLite vs Postgres" via Telegram) is run separately with
-real ANTHROPIC_API_KEY + TELEGRAM_BOT_TOKEN via ``python -m starling``.
+Runs the orchestrator end-to-end with a fake Channel and a fake OpenAI-compatible
+client, so no API key or Telegram token is needed. Covers: schema validation,
+multi-worker parallel fan-out + merge, single-worker short-circuit, unknown-worker
+filtering, and the Pydantic guard rejecting a bad classification.
 """
 
 import asyncio
@@ -14,86 +11,50 @@ import time
 
 from pydantic import ValidationError
 
+from scratch_fakes import (
+    FakeChannel,
+    chat,
+    system_of,
+    text_response,
+    tool_name,
+    tool_response,
+    user_of,
+)
 from starling.blackboard import Blackboard
-from starling.channels.base import Channel, InboundHandler
 from starling.orchestrator import Orchestrator
 from starling.schemas import Classification, Mode, PlannedTask, ProjectPlan
 
 
-def make_orch(channel: "FakeChannel", client: "FakeClient") -> Orchestrator:
-    # Ephemeral-mode tests don't touch the blackboard; an in-memory one satisfies the
-    # constructor. Project-mode decomposition is verified in scratch_phase4.py.
-    return Orchestrator(channel, client, Blackboard(":memory:"))
-
-
-# --- fakes ----------------------------------------------------------------
-
-class FakeChannel(Channel):
-    def __init__(self) -> None:
-        self._handler: InboundHandler | None = None
-        self.sent: list[tuple[int, str]] = []
-
-    def on_message(self, handler: InboundHandler) -> None:
-        self._handler = handler
-
-    async def send(self, chat_id: int, text: str) -> None:
-        self.sent.append((chat_id, text))
-
-    def run(self) -> None:
-        raise NotImplementedError
-
-
-class _Block:
-    def __init__(self, type: str, text: str | None = None, input: dict | None = None) -> None:
-        self.type = type
-        self.text = text
-        self.input = input
-
-
-class _Resp:
-    def __init__(self, content: list[_Block]) -> None:
-        self.content = content
-
-
-class _Messages:
-    def __init__(self, client: "FakeClient") -> None:
-        self._client = client
-
-    async def create(self, **kw):
-        return await self._client._create(**kw)
-
-
 class FakeClient:
-    """Mimics AsyncAnthropic: classify -> tool_use; merge/worker -> text."""
-
     def __init__(self, classification: dict, worker_delay: float = 0.0) -> None:
-        self.messages = _Messages(self)
+        self.chat = chat(self._create)
         self._classification = classification
         self._worker_delay = worker_delay
         self.calls: list[str] = []
 
     async def _create(self, **kw):
-        if kw.get("tools"):
+        if tool_name(kw) == "classify_request":
             self.calls.append("classify")
-            return _Resp([_Block("tool_use", input=self._classification)])
-        system = kw.get("system", "")
-        if system.startswith("You merge"):
+            return tool_response("classify_request", self._classification)
+        if system_of(kw).startswith("You merge"):
             self.calls.append("merge")
-            user = kw["messages"][0]["content"]
-            return _Resp([_Block("text", text="MERGED::" + user)])
-        # worker call — echo the role implied by the system prompt back as the draft
+            return text_response("MERGED::" + user_of(kw))
         self.calls.append("worker")
         if self._worker_delay:
             await asyncio.sleep(self._worker_delay)
-        return _Resp([_Block("text", text="draft for: " + kw["messages"][0]["content"])])
+        return text_response("draft for: " + user_of(kw))
+
+
+def make_orch(channel: FakeChannel, client: FakeClient) -> Orchestrator:
+    # Ephemeral-mode tests don't touch the blackboard; an in-memory one satisfies the
+    # constructor. Project-mode decomposition is verified in scratch_phase4.py.
+    return Orchestrator(channel, client, Blackboard(":memory:"))
 
 
 def check(name: str, condition: bool) -> None:
     print(f"  [{'PASS' if condition else 'FAIL'}] {name}")
     assert condition, name
 
-
-# --- checks ---------------------------------------------------------------
 
 def test_schemas() -> None:
     print("schemas:")
@@ -140,7 +101,6 @@ async def test_multi_worker_parallel() -> None:
     check("classified first", fake.calls[0] == "classify")
     check("two workers dispatched", fake.calls.count("worker") == 2)
     check("merge ran last", fake.calls[-1] == "merge")
-    # 2 workers x 0.2s sequential = 0.4s; parallel should land near 0.2s.
     print(f"    elapsed={elapsed:.3f}s (sequential would be ~0.40s)")
     check("workers ran concurrently (elapsed < 0.35s)", elapsed < 0.35)
 

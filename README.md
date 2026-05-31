@@ -234,7 +234,7 @@ pending ──▶ ready ──▶ running ──▶ done
 ```
 starling/
   __main__.py        # entrypoint: wires channel + client + blackboard + scheduler + orchestrator
-  config.py          # env config: ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TICK_INTERVAL (fail-fast)
+  config.py          # env config: LLM_API_KEY/LLM_BASE_URL/LLM_MODEL, TELEGRAM_BOT_TOKEN, TICK_INTERVAL
   blackboard.py      # SQLite store + TaskStatus enum; projects/tasks tables and all state methods
   schemas.py         # Pydantic models: Mode, Classification, PlannedTask, ProjectPlan
   orchestrator.py    # classify, route, ephemeral fan-out/merge, start project, route human replies
@@ -303,7 +303,9 @@ Environment variables (see [.env.example](.env.example)):
 
 | Variable             | Purpose                                    |
 | -------------------- | ------------------------------------------ |
-| `ANTHROPIC_API_KEY`  | Anthropic API key                          |
+| `LLM_API_KEY`        | API key for your provider (OpenRouter / Groq / OpenAI) |
+| `LLM_BASE_URL`       | Provider base URL (defaults to OpenRouter; Groq/OpenAI presets in `.env.example`) |
+| `LLM_MODEL`          | Model id, e.g. `openai/gpt-4o-mini`        |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token from [@BotFather](https://t.me/BotFather) |
 | `TICK_INTERVAL`      | Scheduler heartbeat in seconds (default 5) |
 
@@ -328,14 +330,15 @@ Then message your bot on Telegram. Try one of each mode:
 
 State persists in `starling.db` (a local SQLite file, gitignored). Kill the process
 mid-project and relaunch — it resumes from the blackboard without redoing completed
-tasks.
+tasks. Run `python -m starling --reset` to wipe the blackboard for a clean run (stop
+any running instance first).
 
 ---
 
 ## Verifying it works (no API key needed)
 
 Each phase ships a self-contained `scratch_phaseN.py` script that exercises the real
-code against **fakes** (a fake channel and a fake Anthropic client) plus a real
+code against **fakes** (a fake channel and a fake OpenAI-compatible client) plus a real
 SQLite blackboard — so the full logic is verifiable offline, with no API key or
 Telegram token:
 
@@ -422,11 +425,13 @@ the focus on the coordination layer:
 ## Tech stack
 
 - **Python 3.11+**
-- **[anthropic](https://pypi.org/project/anthropic/)** — the model client (async),
-  used with tool-use for structured, validated control-flow output
+- **[openai](https://pypi.org/project/openai/)** (async) — the model client, pointed at
+  any OpenAI-compatible provider (OpenRouter / Groq / OpenAI) via `base_url`; used with
+  function-calling for structured, validated control-flow output
 - **[python-telegram-bot](https://python-telegram-bot.org/)** (v20+, async) — the
   Telegram channel
 - **stdlib `sqlite3`** — the durable blackboard
 - **[pydantic](https://docs.pydantic.dev/)** — validation of every LLM control-flow output
+- **[python-dotenv](https://pypi.org/project/python-dotenv/)** — loads secrets from `.env`
 
 No agent framework — by design.

@@ -1,10 +1,10 @@
 """Orchestrator — the brain.
 
-On each inbound message it makes one structured, Pydantic-validated model call to
-classify the request (ephemeral vs project), then routes it. Phase 3 implements
-ephemeral mode end-to-end: fan out to the chosen workers in parallel, merge their
-drafts into one reply, and send it. Project mode (Phase 4) and human-reply routing
-(Phase 6) build on this. See ARCHITECTURE.md §2.2.
+For each inbound message it first checks the blackboard for a task awaiting a human
+reply in this chat and routes the message there if one exists; otherwise it makes one
+structured, Pydantic-validated model call to classify the request and routes it.
+Ephemeral mode fans out to workers in parallel and merges; project mode decomposes
+the goal and persists the task graph. See ARCHITECTURE.md §2.2.
 """
 
 from __future__ import annotations
@@ -12,25 +12,39 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Optional
 
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 
 from .agents.pm import decompose, topological_order
-from .agents.roles import DEFAULT_MODEL, WORKER_ROLES
+from .agents.roles import WORKER_ROLES, active_model
 from .agents.worker import run_task
 from .blackboard import Blackboard, TaskStatus
 from .channels.base import Channel
+from .llm import text_of, tool_args
 from .scheduler import Scheduler
 from .schemas import Classification, Mode
 
 _CLASSIFIER_SYSTEM = (
-    "You route a user's request inside a multi-agent assistant.\n"
-    "- mode 'ephemeral': a one-shot question or task answerable now by fanning out to "
-    "workers and merging their replies.\n"
-    "- mode 'project': a multi-step, longer-running goal that needs a plan of "
-    "dependent tasks.\n"
-    "'goal' restates the request as one clear instruction.\n"
-    f"'workers' lists the roles to handle an ephemeral request, chosen from: "
-    f"{', '.join(WORKER_ROLES)} (pick only the few that genuinely apply)."
+    "You route a user's request inside a multi-agent assistant. Choose the mode and "
+    "restate the user's overall objective as 'goal'.\n"
+    "\n"
+    "Choose mode 'project' when the request is multi-step or needs coordination — it "
+    "requires gathering/researching from several angles and then synthesizing, OR it "
+    "asks you to make a decision or to ask the user something before producing the "
+    "result, OR it otherwise can't be answered well in a single reply.\n"
+    "Choose mode 'ephemeral' only when it is a single question or one piece of content "
+    "you can answer in one reply by fanning out to a few workers and merging.\n"
+    "\n"
+    "Examples:\n"
+    "- 'summarize the pros and cons of SQLite vs Postgres' -> ephemeral\n"
+    "- 'suggest a good name for a cat' -> ephemeral\n"
+    "- 'research the top 3 Python task-queue libraries and write a comparison' -> project\n"
+    "- 'plan a weekend itinerary, but ask me which city first' -> project\n"
+    "- 'help me put together a launch plan for my app' -> project\n"
+    "\n"
+    "'goal' is the user's overall objective as one clear instruction (e.g. 'Plan a "
+    "weekend itinerary'), NOT a sub-step like 'ask the user which city'.\n"
+    f"'workers' applies only to ephemeral requests: the roles to fan out to, chosen from "
+    f"{', '.join(WORKER_ROLES)} (pick only the few that apply; leave empty for projects)."
 )
 
 _MERGE_SYSTEM = (
@@ -39,6 +53,15 @@ _MERGE_SYSTEM = (
     "multiple workers were involved."
 )
 
+_CLASSIFY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "classify_request",
+        "description": "Classify the request and choose the workers to handle it.",
+        "parameters": Classification.model_json_schema(),
+    },
+}
+
 
 class Orchestrator:
     """Classifies and routes inbound messages, sending replies via the channel."""
@@ -46,7 +69,7 @@ class Orchestrator:
     def __init__(
         self,
         channel: Channel,
-        client: AsyncAnthropic,
+        client: AsyncOpenAI,
         blackboard: Blackboard,
         scheduler: Optional[Scheduler] = None,
     ) -> None:
@@ -60,40 +83,42 @@ class Orchestrator:
         try:
             paused = self._bb.awaiting_human(chat_id)
             if paused is not None:
+                print(f"[orchestrator] routing reply to paused task #{paused['id']}")
                 await self._answer_human(chat_id, paused, text)
                 return
             classification = await self._classify(text)
+            print(f"[orchestrator] classified as {classification.mode.value}: {classification.goal[:70]}")
             if classification.mode == Mode.EPHEMERAL:
                 reply = await self._run_ephemeral(classification)
             else:
                 reply = await self._start_project(chat_id, classification)
             await self._channel.send(chat_id, reply)
         except Exception as exc:  # keep the bot responsive on any failure
+            print(f"[orchestrator] error: {exc}")
             await self._channel.send(chat_id, f"Sorry — I hit an error: {exc}")
 
     async def _answer_human(self, chat_id: int, task: dict[str, Any], text: str) -> None:
         """Store the user's reply as the paused task's answer and resume the project."""
         self._bb.set_status(task["id"], TaskStatus.DONE, output=text)
+        await self._channel.send(chat_id, "Got it - continuing.")
         if self._scheduler is not None:
             self._scheduler.poke()  # newly-unblocked tasks can run now
-        await self._channel.send(chat_id, "Got it - continuing.")
+            # If the answer finished the last task, report now — no worker will fire.
+            await self._scheduler.report_if_complete(task["project_id"])
 
     async def _classify(self, text: str) -> Classification:
         """One structured call; the result is validated before it is acted on."""
-        tool = {
-            "name": "classify_request",
-            "description": "Classify the request and choose the workers to handle it.",
-            "input_schema": Classification.model_json_schema(),
-        }
-        resp = await self._client.messages.create(
-            model=DEFAULT_MODEL,
+        resp = await self._client.chat.completions.create(
+            model=active_model(),
             max_tokens=512,
-            system=_CLASSIFIER_SYSTEM,
-            tools=[tool],
-            tool_choice={"type": "tool", "name": "classify_request"},
-            messages=[{"role": "user", "content": text}],
+            messages=[
+                {"role": "system", "content": _CLASSIFIER_SYSTEM},
+                {"role": "user", "content": text},
+            ],
+            tools=[_CLASSIFY_TOOL],
+            tool_choice={"type": "function", "function": {"name": "classify_request"}},
         )
-        return Classification.model_validate(_tool_use_input(resp))
+        return Classification.model_validate(tool_args(resp))
 
     async def _run_ephemeral(self, classification: Classification) -> str:
         """Fan out to the chosen workers in parallel, then merge into one reply."""
@@ -111,7 +136,7 @@ class Orchestrator:
 
         Tasks are inserted in topological order so each task's index dependencies are
         already resolved to blackboard ids by the time it is added. No execution yet —
-        the scheduler (a later phase) drives the tasks to completion.
+        the scheduler drives the tasks to completion.
         """
         plan = await decompose(classification.goal, client=self._client)
         project_id = self._bb.create_project(chat_id, classification.goal)
@@ -122,29 +147,19 @@ class Orchestrator:
             id_by_index[index] = self._bb.add_task(
                 task.role, task.description, project_id=project_id, depends_on=dep_ids
             )
+        print(f"[orchestrator] project #{project_id}: {len(plan.tasks)} tasks queued")
         if self._scheduler is not None:
             self._scheduler.poke()  # start executing the new tasks now
         return f"Project #{project_id} started - {len(plan.tasks)} tasks queued."
 
     async def _merge(self, goal: str, drafts: list[tuple[str, str]]) -> str:
         joined = "\n\n".join(f"[{role}]\n{output}" for role, output in drafts)
-        resp = await self._client.messages.create(
-            model=DEFAULT_MODEL,
+        resp = await self._client.chat.completions.create(
+            model=active_model(),
             max_tokens=1024,
-            system=_MERGE_SYSTEM,
             messages=[
-                {"role": "user", "content": f"User request:\n{goal}\n\nWorker drafts:\n{joined}"}
+                {"role": "system", "content": _MERGE_SYSTEM},
+                {"role": "user", "content": f"User request:\n{goal}\n\nWorker drafts:\n{joined}"},
             ],
         )
-        return _text(resp)
-
-
-def _tool_use_input(resp: Any) -> dict[str, Any]:
-    for block in resp.content:
-        if block.type == "tool_use":
-            return block.input
-    raise ValueError("classifier did not return a tool_use block")
-
-
-def _text(resp: Any) -> str:
-    return "".join(block.text for block in resp.content if block.type == "text").strip()
+        return text_of(resp)

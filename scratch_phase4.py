@@ -1,85 +1,43 @@
 """Scratch verification for Phase 4 (project mode: PM decomposition).
 
-Runs decompose + the orchestrator's project flow with a fake Anthropic client and a
-real (file-backed) blackboard, so no API key or Telegram token is needed. Covers:
-schema-validated decomposition, graph repair (drop bad deps), and rejection of
-cycles / too-many-tasks / unknown roles; plus the end-to-end project flow that
-persists a sane task graph with index deps resolved to blackboard ids — and no
-execution.
-
-The live check ("research the top 3 Python task-queue libraries and write a short
-comparison" via Telegram) is run separately with real keys via ``python -m starling``.
+Runs decompose + the orchestrator's project flow with a fake OpenAI-compatible client
+and a real (file-backed) blackboard, so no API key or Telegram token is needed.
+Covers: schema-validated decomposition, graph repair (drop bad deps), rejection of
+cycles / too-many-tasks / unknown roles, and the end-to-end project flow that persists
+a sane task graph with index deps resolved to blackboard ids — and no execution.
 """
 
 import asyncio
 import os
 
+from scratch_fakes import FakeChannel, chat, text_response, tool_name, tool_response
 from starling.agents.pm import MAX_TASKS, decompose, topological_order
 from starling.blackboard import Blackboard, TaskStatus
-from starling.channels.base import Channel, InboundHandler
 from starling.orchestrator import Orchestrator
 from starling.schemas import PlannedTask
 
 DB = "phase4_scratch.db"
 
 
-# --- fakes ----------------------------------------------------------------
-
-class FakeChannel(Channel):
-    def __init__(self) -> None:
-        self._handler: InboundHandler | None = None
-        self.sent: list[tuple[int, str]] = []
-
-    def on_message(self, handler: InboundHandler) -> None:
-        self._handler = handler
-
-    async def send(self, chat_id: int, text: str) -> None:
-        self.sent.append((chat_id, text))
-
-    def run(self) -> None:
-        raise NotImplementedError
-
-
-class _Block:
-    def __init__(self, type: str, text: str | None = None, input: dict | None = None) -> None:
-        self.type = type
-        self.text = text
-        self.input = input
-
-
-class _Resp:
-    def __init__(self, content: list[_Block]) -> None:
-        self.content = content
-
-
-class _Messages:
-    def __init__(self, client: "FakeClient") -> None:
-        self._client = client
-
-    async def create(self, **kw):
-        return await self._client._create(**kw)
-
-
 class FakeClient:
     """Returns the classification for classify_request and the plan for submit_plan."""
 
     def __init__(self, plan: dict, classification: dict | None = None) -> None:
-        self.messages = _Messages(self)
+        self.chat = chat(self._create)
         self._plan = plan
         self._classification = classification
         self.calls: list[str] = []
 
     async def _create(self, **kw):
-        tools = kw.get("tools") or []
-        name = tools[0]["name"] if tools else ""
+        name = tool_name(kw)
         if name == "classify_request":
             self.calls.append("classify")
-            return _Resp([_Block("tool_use", input=self._classification)])
+            return tool_response("classify_request", self._classification)
         if name == "submit_plan":
             self.calls.append("decompose")
-            return _Resp([_Block("tool_use", input=self._plan)])
+            return tool_response("submit_plan", self._plan)
         self.calls.append("text")  # a worker/merge call would mean unwanted execution
-        return _Resp([_Block("text", text="UNEXPECTED")])
+        return text_response("UNEXPECTED")
 
 
 def check(name: str, condition: bool) -> None:
@@ -95,8 +53,6 @@ async def expect_value_error(coro, label: str) -> None:
         raised = True
     check(label, raised)
 
-
-# --- checks ---------------------------------------------------------------
 
 async def test_decompose_happy() -> None:
     print("decompose: 3 researchers -> 1 summarizer:")
@@ -148,6 +104,18 @@ async def test_decompose_rejects_unknown_role() -> None:
     await expect_value_error(decompose("g", client=FakeClient(plan_dict)), "unknown role raises")
 
 
+async def test_gate_on_decision() -> None:
+    print("\ndecompose: a single up-front pm decision gates all other tasks:")
+    plan_dict = {"tasks": [
+        {"role": "pm", "description": "Which city?", "depends_on": []},
+        {"role": "researcher", "description": "research", "depends_on": []},   # forgot to gate
+        {"role": "summarizer", "description": "write it up", "depends_on": [1]},
+    ]}
+    plan = await decompose("g", client=FakeClient(plan_dict))
+    check("researcher now depends on the pm task", 0 in plan.tasks[1].depends_on)
+    check("summarizer is gated too", 0 in plan.tasks[2].depends_on)
+
+
 def test_topological_order() -> None:
     print("\ntopological_order respects dependencies:")
     tasks = [
@@ -184,7 +152,6 @@ async def test_project_flow_persists_graph() -> None:
     check("one confirmation reply sent", len(channel.sent) == 1)
     check("reply confirms the project started", "Project #1" in channel.sent[0][1])
 
-    # Fresh DB: researchers -> ids 1,2,3 (inserted first), summarizer -> id 4.
     ready = bb.ready_tasks()
     check("3 researcher tasks are ready", [t["id"] for t in ready] == [1, 2, 3])
     check("all ready tasks are researchers", all(t["role"] == "researcher" for t in ready))
@@ -194,7 +161,6 @@ async def test_project_flow_persists_graph() -> None:
     check("summarizer deps resolved to researcher blackboard ids", summarizer["depends_on"] == [1, 2, 3])
     bb.close()
 
-    # Reopen the file in a new Blackboard to confirm the graph persisted.
     bb2 = Blackboard(DB)
     persisted = bb2.get_task(4)
     check("graph persisted across reopen", persisted["status"] == TaskStatus.PENDING
@@ -210,8 +176,11 @@ async def main() -> None:
     await test_decompose_rejects_cycle()
     await test_decompose_rejects_too_many()
     await test_decompose_rejects_unknown_role()
+    await test_gate_on_decision()
     test_topological_order()
     await test_project_flow_persists_graph()
+    if os.path.exists(DB):
+        os.remove(DB)
     print("\nALL PASS: project decomposition + blackboard persistence verified offline.")
 
 

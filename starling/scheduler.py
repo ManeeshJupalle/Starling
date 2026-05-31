@@ -13,9 +13,9 @@ Because all state lives in the blackboard, a restart resumes in-flight projects:
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Optional
 
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 
 from .agents.worker import run_task
 from .blackboard import Blackboard, TaskStatus
@@ -29,7 +29,7 @@ class Scheduler:
         self,
         blackboard: Blackboard,
         channel: Channel,
-        client: AsyncAnthropic,
+        client: AsyncOpenAI,
         tick_interval: float,
     ) -> None:
         self._bb = blackboard
@@ -37,6 +37,7 @@ class Scheduler:
         self._client = client
         self._tick_interval = tick_interval
         self._wake = asyncio.Event()
+        self._reported: set[int] = set()  # projects already reported complete
 
     def poke(self) -> None:
         """Ask the scheduler to run a pass as soon as possible."""
@@ -74,6 +75,7 @@ class Scheduler:
         if task["role"] == "pm":
             await self._ask_human(task)
             return
+        print(f"[scheduler] running task #{task['id']} ({task['role']})")
         self._bb.set_status(task["id"], TaskStatus.RUNNING)
         try:
             inputs = self._gather_inputs(task)
@@ -81,11 +83,13 @@ class Scheduler:
                 task["role"], task["description"], inputs, client=self._client
             )
         except Exception as exc:  # record the failure and move on; dependents stall
+            print(f"[scheduler] task #{task['id']} FAILED: {exc}")
             self._bb.set_status(task["id"], TaskStatus.FAILED, output=f"error: {exc}")
             return
         self._bb.set_status(task["id"], TaskStatus.DONE, output=output)
         task["output"] = output  # keep the in-memory dict in sync for reporting
-        await self._report_if_terminal(task)
+        print(f"[scheduler] task #{task['id']} done")
+        await self.report_if_complete(task["project_id"])
 
     async def _ask_human(self, task: dict[str, Any]) -> None:
         """Pause a 'pm' question task: store the question and ask it in the chat.
@@ -96,6 +100,7 @@ class Scheduler:
         self._bb.set_status(
             task["id"], TaskStatus.AWAITING_HUMAN, question=task["description"]
         )
+        print(f"[scheduler] task #{task['id']} awaiting human - asked in chat")
         project = self._bb.get_project(task["project_id"]) if task["project_id"] else None
         if project is not None:
             await self._channel.send(project["chat_id"], task["description"])
@@ -113,17 +118,35 @@ class Scheduler:
                 )
         return {"upstream_results": upstream}
 
-    async def _report_if_terminal(self, task: dict[str, Any]) -> None:
-        """Post the result of a terminal task (nothing depends on it) to its chat."""
-        project_id = task["project_id"]
-        if project_id is None:
+    async def report_if_complete(self, project_id: Optional[int]) -> None:
+        """Post the project's result once every task is finished — and not before.
+
+        Gating on the whole project being settled (no task still pending, ready,
+        running, or awaiting_human) means an unanswered decision blocks completion,
+        rather than a stray terminal task declaring the project done prematurely.
+        Called whenever a task settles — a worker finishing or a human answering.
+        """
+        if project_id is None or project_id in self._reported:
             return
         tasks = self._bb.project_tasks(project_id)
-        if any(task["id"] in other["depends_on"] for other in tasks):
-            return  # something downstream still depends on this task
+        active = {
+            TaskStatus.PENDING.value,
+            TaskStatus.READY.value,
+            TaskStatus.RUNNING.value,
+            TaskStatus.AWAITING_HUMAN.value,
+        }
+        if any(t["status"] in active for t in tasks):
+            return  # still working, or waiting on a human answer
         project = self._bb.get_project(project_id)
         if project is None:
             return
-        await self._channel.send(
-            project["chat_id"], f"Project #{project_id} complete:\n\n{task['output']}"
-        )
+        # Post the output of the terminal task(s) — the ones nothing depends on.
+        sinks = [
+            t for t in tasks
+            if t["status"] == TaskStatus.DONE
+            and not any(t["id"] in other["depends_on"] for other in tasks)
+        ]
+        result = "\n\n".join(t["output"] for t in sinks if t["output"]) or "(no output)"
+        self._reported.add(project_id)
+        print(f"[scheduler] project #{project_id} complete")
+        await self._channel.send(project["chat_id"], f"Project #{project_id} complete:\n\n{result}")

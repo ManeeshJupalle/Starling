@@ -1,3 +1,4 @@
-anthropic
+openai
 python-telegram-bot
 pydantic
+python-dotenv

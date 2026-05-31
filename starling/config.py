@@ -1,16 +1,21 @@
 """Environment configuration for Starling.
 
-Reads required secrets and tunables from the process environment. Importing this
-module fails fast with a clear message when a required variable is missing, so
-misconfiguration surfaces at startup rather than mid-run.
+Loads a local ``.env`` (if present) and reads required secrets + tunables from the
+environment. Importing this module fails fast with a clear message when a required
+variable is missing, so misconfiguration surfaces at startup rather than mid-run.
 
-Copy ``.env.example`` to ``.env`` and export the values (or set them in your
-shell) before running anything.
+The LLM provider is OpenAI-compatible and selected entirely via env vars, so Starling
+can point at OpenRouter, Groq, OpenAI, or any compatible endpoint without code
+changes — see ``.env.example``.
 """
 
 from __future__ import annotations
 
 import os
+
+from dotenv import load_dotenv
+
+load_dotenv()  # populate os.environ from a local .env file if one exists
 
 
 def _require(name: str) -> str:
@@ -19,13 +24,16 @@ def _require(name: str) -> str:
     if not value:
         raise RuntimeError(
             f"Required environment variable {name!r} is not set. "
-            "Copy .env.example to .env and fill it in, then export the values."
+            "Copy .env.example to .env and fill it in."
         )
     return value
 
 
-# Secrets — required.
-ANTHROPIC_API_KEY: str = _require("ANTHROPIC_API_KEY")
+# LLM provider (OpenAI-compatible) — key required; base URL has an OpenRouter default.
+LLM_API_KEY: str = _require("LLM_API_KEY")
+LLM_BASE_URL: str = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+
+# Telegram — required.
 TELEGRAM_BOT_TOKEN: str = _require("TELEGRAM_BOT_TOKEN")
 
 # Scheduler heartbeat in seconds — optional, defaults to 5.

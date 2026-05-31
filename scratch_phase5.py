@@ -1,80 +1,40 @@
 """Scratch verification for Phase 5 (scheduler: heartbeat, deps, resume).
 
 Drives a real file-backed blackboard project through the scheduler with a fake
-Anthropic client, so no API key or Telegram token is needed. Covers: running a
+OpenAI-compatible client, so no API key or Telegram token is needed. Covers: running a
 dependency graph to completion, passing upstream outputs as inputs, posting only the
 terminal task's result, crash recovery (running -> ready), and resuming after a
 restart without redoing completed tasks.
-
-The live check (run the task-queue project via Telegram, then kill + restart) is run
-separately with real keys via ``python -m starling``.
 """
 
 import asyncio
 import os
 
+from scratch_fakes import FakeChannel, chat, system_of, text_response, user_of
 from starling.agents.roles import ROLE_PROMPTS
 from starling.blackboard import Blackboard, TaskStatus
-from starling.channels.base import Channel, InboundHandler
 from starling.scheduler import Scheduler
 
 DB = "phase5_scratch.db"
 _SYS_TO_ROLE = {prompt: role for role, prompt in ROLE_PROMPTS.items()}
 
 
-# --- fakes ----------------------------------------------------------------
-
-class FakeChannel(Channel):
-    def __init__(self) -> None:
-        self._handler: InboundHandler | None = None
-        self.sent: list[tuple[int, str]] = []
-
-    def on_message(self, handler: InboundHandler) -> None:
-        self._handler = handler
-
-    async def send(self, chat_id: int, text: str) -> None:
-        self.sent.append((chat_id, text))
-
-    def run(self, on_start=None) -> None:
-        raise NotImplementedError
-
-
-class _Block:
-    def __init__(self, text: str) -> None:
-        self.type = "text"
-        self.text = text
-
-
-class _Resp:
-    def __init__(self, content: list[_Block]) -> None:
-        self.content = content
-
-
-class _Messages:
-    def __init__(self, client: "FakeClient") -> None:
-        self._client = client
-
-    async def create(self, **kw):
-        return await self._client._create(**kw)
-
-
 class FakeClient:
     """Returns role-tagged worker output and records the prompt it was given."""
 
     def __init__(self) -> None:
-        self.messages = _Messages(self)
+        self.chat = chat(self._create)
         self.prompts: list[tuple[str, str]] = []  # (role, user_prompt)
 
     async def _create(self, **kw):
-        system = kw["system"]
-        user = kw["messages"][0]["content"]
-        role = _SYS_TO_ROLE.get(system, "?")
+        role = _SYS_TO_ROLE.get(system_of(kw), "?")
+        user = user_of(kw)
         self.prompts.append((role, user))
         if role == "researcher":
-            return _Resp([_Block(f"RDATA({user})")])
+            return text_response(f"RDATA({user})")
         if role == "summarizer":
-            return _Resp([_Block("FINAL-COMPARISON")])
-        return _Resp([_Block("X")])
+            return text_response("FINAL-COMPARISON")
+        return text_response("X")
 
     def role_calls(self, role: str) -> int:
         return sum(1 for r, _ in self.prompts if r == role)
@@ -106,8 +66,6 @@ async def drain(sched: Scheduler, bb: Blackboard, pid: int, max_ticks: int = 10)
             return
 
 
-# --- checks ---------------------------------------------------------------
-
 async def test_runs_to_completion() -> None:
     print("scheduler runs a dependency graph to completion:")
     if os.path.exists(DB):
@@ -125,12 +83,10 @@ async def test_runs_to_completion() -> None:
     check("3 researcher runs + 1 summarizer run",
           client.role_calls("researcher") == 3 and client.role_calls("summarizer") == 1)
 
-    # The summarizer's prompt must contain the researchers' outputs (inputs passed).
     summ_prompt = next(user for role, user in client.prompts if role == "summarizer")
     check("summarizer received upstream researcher outputs", "RDATA(" in summ_prompt)
     check("summarizer output stored", tasks[summarizer]["output"] == "FINAL-COMPARISON")
 
-    # Only the terminal task (summarizer) is reported, once, to the project's chat.
     check("exactly one result posted", len(channel.sent) == 1)
     check("posted to the project's chat", channel.sent[0][0] == 7)
     check("posted the final comparison", "FINAL-COMPARISON" in channel.sent[0][1])
@@ -158,7 +114,6 @@ async def test_resume_skips_completed() -> None:
     if os.path.exists(DB):
         os.remove(DB)
 
-    # First process: run one tick so the researchers finish, then "crash".
     bb1 = Blackboard(DB)
     pid, researchers, summarizer = build_project(bb1)
     client1 = FakeClient()
@@ -169,7 +124,6 @@ async def test_resume_skips_completed() -> None:
     check("3 researcher runs in first process", client1.role_calls("researcher") == 3)
     bb1.close()
 
-    # Second process: reopen the same .db with a fresh client + channel.
     bb2 = Blackboard(DB)
     client2 = FakeClient()
     channel2 = FakeChannel()
