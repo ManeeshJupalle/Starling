@@ -40,6 +40,14 @@ ROLE_PROMPTS: dict[str, str] = {
         "idiomatic code for the task with a one-line explanation. No unnecessary "
         "boilerplate."
     ),
+    "operator": (
+        "You are the operator in a multi-agent assistant — the agent that acts on the "
+        "user's behalf through their connected tools (email, calendar, Slack, files). "
+        "Use the tools to read whatever you need, then carry out the request precisely. "
+        "For anything that sends, creates, deletes, or modifies, just call the tool — the "
+        "system asks the user for approval before it actually runs. Report concretely "
+        "what you found or did; never invent results you didn't get from a tool."
+    ),
     "pm": (
         "You are the project manager in a multi-agent assistant. Decompose a goal into "
         "a small, acyclic set of concrete tasks for the available worker roles. Used "
@@ -49,7 +57,7 @@ ROLE_PROMPTS: dict[str, str] = {
 
 # Roles dispatchable as ephemeral fan-out workers. 'pm' plans projects; it is not an
 # ephemeral worker, so it is excluded here.
-WORKER_ROLES: tuple[str, ...] = ("researcher", "summarizer", "coder")
+WORKER_ROLES: tuple[str, ...] = ("researcher", "summarizer", "coder", "operator")
 
 # Roles a PM may assign to a planned task: the workers plus 'pm', whose description is
 # a question routed to the user at a decision point (human-in-the-loop, ARCHITECTURE.md §3).
@@ -64,6 +72,7 @@ ROLE_TOOLS: dict[str, list[str]] = {
     "researcher": ["filesystem", "github", "web"],
     "summarizer": ["filesystem"],
     "coder": ["filesystem"],
+    "operator": ["gmail", "calendar", "slack", "filesystem"],
 }
 
 
