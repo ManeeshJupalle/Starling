@@ -24,7 +24,7 @@ from . import usage
 from .llm import text_of, tool_args
 from .memory import recall_context
 from .scheduler import Scheduler
-from .schemas import Classification, Mode, ScheduleSpec
+from .schemas import Classification, Mode, ScheduleSpec, WatchSpec
 
 _CLASSIFIER_SYSTEM = (
     "You route a user's request inside a multi-agent assistant. Choose the mode and "
@@ -58,7 +58,11 @@ _CLASSIFIER_SYSTEM = (
     "'every morning brief me', 'remind me daily at 8am to stretch', 'at 18:30 summarize "
     "my day'. Fill {recurrence: 'daily'|'once', at: 'HH:MM' 24-hour}, and put the task "
     "itself in 'goal' (e.g. goal='Give me a morning brief'). A request to do something "
-    "right now is NOT a schedule — leave it null."
+    "right now is NOT a schedule — leave it null.\n"
+    "'watch': set ONLY when the user asks to watch their inbox / react to incoming email "
+    "— 'when an email from my boss arrives, draft a reply', 'watch for new unread mail "
+    "and summarize it'. Fill {query: a Gmail search like 'is:unread' or 'from:boss@x.com', "
+    "every_minutes: how often to check}, and put what to do in 'goal'. Otherwise null."
 )
 
 _MERGE_SYSTEM = (
@@ -119,6 +123,11 @@ class Orchestrator:
             if classification.schedule is not None:
                 await self._channel.send(
                     chat_id, self._create_trigger(chat_id, classification.goal, classification.schedule)
+                )
+                return
+            if classification.watch is not None:
+                await self._channel.send(
+                    chat_id, self._create_watch(chat_id, classification.goal, classification.watch)
                 )
                 return
             if classification.mode == Mode.EPHEMERAL:
@@ -258,6 +267,18 @@ class Orchestrator:
         when = f"every day at {clock}" if spec.recurrence == "daily" else f"at {clock} on {target:%b %d}"
         print(f"[orchestrator] scheduled '{goal[:40]}' {when}")
         return f"Scheduled - I'll handle \"{goal}\" {when}."
+
+    def _create_watch(self, chat_id: int, goal: str, spec: WatchSpec) -> str:
+        """Persist an inbox watch (polls Gmail search) and return a human confirmation."""
+        interval_s = max(60, int(spec.every_minutes) * 60)
+        now = datetime.now().replace(microsecond=0)  # next_run = now -> baseline on next tick
+        self._bb.add_watch(
+            chat_id, goal, "gmail__search_emails", {"query": spec.query}, interval_s, now.isoformat()
+        )
+        mins = interval_s // 60
+        print(f"[orchestrator] watching inbox '{spec.query}' every {mins}m -> {goal[:40]}")
+        return (f"Watching your inbox for \"{spec.query}\" every {mins} min - "
+                f"I'll \"{goal}\" when something new arrives.")
 
     async def _merge(self, goal: str, drafts: list[tuple[str, str]], memory: str = "") -> str:
         joined = "\n\n".join(f"[{role}]\n{output}" for role, output in drafts)

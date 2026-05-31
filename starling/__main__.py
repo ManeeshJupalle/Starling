@@ -48,6 +48,13 @@ def main() -> None:
     scheduler = Scheduler(blackboard, channel, client, config.TICK_INTERVAL, tools_manager=tools_manager)
     orchestrator = Orchestrator(channel, client, blackboard, scheduler, tools_manager=tools_manager)
     scheduler.on_trigger = orchestrator.run_goal  # let due triggers start projects/answers
+
+    async def _poll_tool(name: str, args: dict) -> str:
+        """Call one MCP read tool by name (used by inbox-watch triggers)."""
+        registry = tools_manager.registry_for([name.split("__", 1)[0]], include_sensitive=True)
+        return await registry.call(name, args)
+
+    scheduler.poll_tool = _poll_tool
     channel.on_message(orchestrator.handle_message)
     dashboard = WebDashboard(blackboard, port=config.DASHBOARD_PORT)
 

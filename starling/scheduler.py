@@ -13,6 +13,7 @@ Because all state lives in the blackboard, a restart resumes in-flight projects:
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Optional
 
@@ -48,6 +49,9 @@ class Scheduler:
         # start a project/answer. Kept as a callback to avoid a scheduler<->orchestrator
         # import cycle.
         self.on_trigger: Optional[Callable[[int, str], Awaitable[None]]] = None
+        # Set by wiring to a (tool_name, args) -> result-text caller; lets a watch trigger
+        # poll an MCP read tool (e.g. gmail__search_emails). Injectable for tests.
+        self.poll_tool: Optional[Callable[[str, dict], Awaitable[str]]] = None
 
     def poke(self) -> None:
         """Ask the scheduler to run a pass as soon as possible."""
@@ -92,12 +96,44 @@ class Scheduler:
             return
         now = now or datetime.now().replace(microsecond=0)
         for trig in self._bb.due_triggers(now.isoformat()):
+            if trig.get("kind") == "watch":
+                await self._fire_watch(trig, now)
+                continue
             self._advance_trigger(trig, now)
             print(f"[scheduler] firing trigger #{trig['id']} -> {trig['goal'][:50]}")
             try:
                 await self.on_trigger(trig["chat_id"], trig["goal"])
             except Exception as exc:
                 print(f"[scheduler] trigger #{trig['id']} failed: {exc}")
+
+    async def _fire_watch(self, trig: dict[str, Any], now: datetime) -> None:
+        """Poll a watch's tool; if its result changed since last time, fire the goal.
+
+        The first successful poll only records a baseline (so an existing inbox isn't
+        treated as 'new'); later changes fire. Re-armed every poll regardless of outcome.
+        """
+        spec = json.loads(trig["watch"])
+        interval_s = int(spec.get("interval_s", 300))
+        self._bb.set_trigger_next_run(trig["id"], (now + timedelta(seconds=interval_s)).isoformat())
+        if self.poll_tool is None:
+            return
+        try:
+            result = (await self.poll_tool(spec["tool"], spec.get("query") or {})) or ""
+        except Exception as exc:
+            print(f"[scheduler] watch #{trig['id']} poll failed: {exc}")
+            return
+        if not result or result.lower().startswith("error"):
+            return  # nothing to compare against; try again next interval
+        if trig["cursor"] is None:  # first poll: establish the baseline, don't fire
+            self._bb.set_trigger_cursor(trig["id"], result)
+            return
+        if result != trig["cursor"]:
+            self._bb.set_trigger_cursor(trig["id"], result)
+            print(f"[scheduler] watch #{trig['id']} detected a change -> firing")
+            if self.on_trigger is not None:
+                await self.on_trigger(
+                    trig["chat_id"], f"{trig['goal']}\n\n--- New inbox content ---\n{result}"
+                )
 
     def _advance_trigger(self, trig: dict[str, Any], now: datetime) -> None:
         """Re-arm a daily trigger for its next future firing; retire a one-shot."""

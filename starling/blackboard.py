@@ -68,9 +68,20 @@ CREATE TABLE IF NOT EXISTS triggers (
     recurrence TEXT    NOT NULL DEFAULT 'once',
     next_run   TEXT    NOT NULL,
     enabled    INTEGER NOT NULL DEFAULT 1,
+    kind       TEXT    NOT NULL DEFAULT 'schedule',
+    watch      TEXT,
+    cursor     TEXT,
     created_at TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 """
+
+# Columns added to `triggers` after its first release (Phase H2). Applied idempotently
+# so a database created by an earlier version upgrades in place.
+_TRIGGER_MIGRATIONS = [
+    ("kind", "kind TEXT NOT NULL DEFAULT 'schedule'"),
+    ("watch", "watch TEXT"),
+    ("cursor", "cursor TEXT"),
+]
 
 
 class Blackboard:
@@ -88,6 +99,10 @@ class Blackboard:
         self._conn.execute("PRAGMA foreign_keys = ON")
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            existing = {r["name"] for r in self._conn.execute("PRAGMA table_info(triggers)")}
+            for column, ddl in _TRIGGER_MIGRATIONS:
+                if column not in existing:
+                    self._conn.execute(f"ALTER TABLE triggers ADD COLUMN {ddl}")
             self._conn.commit()
 
     # --- projects ----------------------------------------------------------
@@ -293,6 +308,29 @@ class Blackboard:
             )
             self._conn.commit()
             return int(cur.lastrowid)
+
+    def add_watch(
+        self, chat_id: int, goal: str, tool: str, query: dict[str, Any],
+        interval_s: int, next_run: str,
+    ) -> int:
+        """Create a watch trigger that polls ``tool`` and fires ``goal`` on a change."""
+        watch = json.dumps({"tool": tool, "query": query, "interval_s": interval_s})
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO triggers (chat_id, goal, recurrence, next_run, kind, watch) "
+                "VALUES (?, ?, 'watch', ?, 'watch', ?)",
+                (chat_id, goal, next_run, watch),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def set_trigger_cursor(self, trigger_id: int, cursor: str) -> None:
+        """Record the latest seen snapshot for a watch (its change-detection baseline)."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE triggers SET cursor = ? WHERE id = ?", (cursor, trigger_id)
+            )
+            self._conn.commit()
 
     def due_triggers(self, now_iso: str) -> list[dict[str, Any]]:
         """Enabled triggers whose ``next_run`` has arrived (ISO strings compare directly)."""

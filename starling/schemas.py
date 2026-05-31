@@ -30,6 +30,17 @@ class ScheduleSpec(BaseModel):
     at: str = Field(description="Time of day to fire, 24-hour 'HH:MM'.")
 
 
+class WatchSpec(BaseModel):
+    """An inbox watch the user asked to set up (Phase H2): poll Gmail, act on change."""
+
+    query: str = Field(
+        description="Gmail search query to poll, e.g. 'is:unread' or 'from:boss@x.com'."
+    )
+    every_minutes: int = Field(
+        default=5, description="How often to poll the inbox, in minutes."
+    )
+
+
 class Classification(BaseModel):
     """The orchestrator's first call: route a request (ARCHITECTURE.md §5)."""
 
@@ -48,6 +59,12 @@ class Classification(BaseModel):
         default=None,
         description="Set ONLY when the user asks to set up a recurring or future task "
         "(e.g. 'every morning brief me'); otherwise null. 'goal' holds the task itself.",
+    )
+    watch: Optional[WatchSpec] = Field(
+        default=None,
+        description="Set ONLY when the user asks to watch their inbox / react to new "
+        "emails (e.g. 'when an email from my boss arrives, draft a reply'); otherwise "
+        "null. 'goal' holds what to do when something new arrives.",
     )
 
 
