@@ -105,7 +105,8 @@ the loop stays hand-rolled.
 ### 2.5 Worker pool
 - Same model, different system prompts per role. (Model-per-role is a one-line config
   swap — documented but not built in v1.)
-- Roles: `researcher`, `summarizer`, `coder`, and the special `pm`.
+- Roles: `researcher`, `summarizer`, `coder`, `operator` (acts on your email/calendar/
+  Slack, §9.1), and the special `pm`.
 - Workers are **stateless**: prompt built from role + task inputs, model called,
   output returned. All durable state lives in the blackboard.
 
@@ -163,10 +164,10 @@ starling/
   __main__.py            # wiring + entrypoint
   config.py              # env: LLM_* (OpenAI-compatible), TELEGRAM_BOT_TOKEN, TICK_INTERVAL, DASHBOARD_PORT
   llm.py                 # OpenAI-compatible client factory + response helpers (§1 stack)
-  blackboard.py          # SQLite store + TaskStatus enum; projects, tasks (status/deps/checkpoint), memories
-  schemas.py             # Pydantic: Classification, PlannedTask, ProjectPlan
-  orchestrator.py        # classify, route, handle human replies + tool approvals
-  scheduler.py           # heartbeat + ready-task dispatch; pause for approval
+  blackboard.py          # SQLite store + TaskStatus enum; projects, tasks, memories, triggers (§9.2)
+  schemas.py             # Pydantic: Classification (mode/schedule/watch), ProjectPlan, Verdict
+  orchestrator.py        # classify, route, human replies + approvals, triggers, morning brief (§9)
+  scheduler.py           # heartbeat + ready-task dispatch; pause for approval; fire triggers; critic (§9)
   memory.py              # recall user context for prompt injection (§8)
   usage.py               # token + rough cost tracking (§8)
   channels/
@@ -174,9 +175,10 @@ starling/
     telegram.py          # Telegram adapter
     web.py               # live web dashboard (aiohttp + SSE) (§8)
   agents/
-    roles.py             # role -> system prompt; per-role MCP tool grants
+    roles.py             # role -> system prompt; per-role MCP tool grants; pm_model() (§9.4)
     worker.py            # run_task / resume_task — agentic tool loop, pauses for approval (§8)
-    pm.py                # decompose(goal) -> ProjectPlan
+    pm.py                # decompose(goal) -> ProjectPlan; morning_brief_plan() (§9.3)
+    critic.py            # critique(goal, draft) -> Verdict — verify step (§9.4)
   tools/                 # §8 — the tool layer
     base.py              # Tool, ToolRegistry, read-only safety check
     mcp.py               # MCPManager: connect MCP servers, wrap their tools
@@ -252,3 +254,68 @@ needed for the common `npx`-launched reference servers).
 Read tools expose personal data to the model provider — expected for a personal agent,
 but know it happens. Write/destructive tools are approval-gated (§8.5); code/shell
 tools must be sandboxed. Start read-only; add writes only behind the approval flow.
+
+The read/write classifier (`is_read_only`) is a name heuristic: a tool is auto-run only
+if its operation starts with a read verb **and** no name token is a write verb (so
+`get_or_create_label` is correctly gated). Genuine reads whose names dodge the rule
+(e.g. `slack_list_channels`) are opted in per server via `read_only_tools` in
+`mcp_servers.json`. Default-deny throughout: when in doubt, it asks.
+
+---
+
+## 9. Proactive layer & self-checking (Starling-Claw, phases G–I)
+
+§1–§8 react to your messages. This layer lets the flock **act on your real accounts**,
+**act on its own**, and **check its own work** — without changing the coordination core.
+
+### 9.1 Real integrations + the `operator` role
+A new `operator` worker role is granted the Gmail / Google Calendar / Slack MCP servers
+and is the agent that acts on your accounts. The classifier routes account-touching
+requests to it. Reads auto-run; sends/creates/deletes flow through the §8.5 approval
+gate unchanged — the safety story was already built, so integrations are mostly config
+(`mcp_servers.json` + `SETUP_INTEGRATIONS.md`). Servers ship disabled until credentials
+are set, and a missing one is skipped, never fatal.
+
+### 9.2 Triggers — scheduled and event-driven
+A `triggers` table makes the scheduler **start** projects, not just drive them. Each
+heartbeat, `_fire_due_triggers` runs any trigger whose `next_run` has arrived:
+
+- **schedule** (`recurrence` `once`/`daily`) — fires its goal at a clock time; daily
+  re-arms (skipping missed days), one-shots retire. The classifier extracts a
+  `ScheduleSpec {recurrence, at}` from "every morning brief me"-style messages.
+- **watch** — polls a read tool (Gmail search) on an interval and fires only when the
+  result **changes** vs a stored `cursor` (the first poll just baselines, so an existing
+  inbox isn't treated as new); the changed content is passed to the goal as context.
+
+A fired trigger calls `orchestrator.run_goal`, which classifies and runs the goal,
+delivering the result to the chat **unprompted**. Trigger firing is advanced/disabled
+*before* the goal runs, so a slow run can't double-fire.
+
+### 9.3 Morning Brief — the multi-agent showcase
+`morning_brief_plan()` is a hand-built project (not PM-decomposed, for determinism):
+`operator`(calendar) ‖ `operator`(email) ‖ `researcher`(news) run **in parallel**, a
+`summarizer` merges them into one digest. It's the thing a single assistant does slowly
+and serially that the flock does at once — and a daily schedule (§9.2) makes it arrive
+on its own each morning.
+
+### 9.4 Planning quality + the critic (phase I)
+Two reliability levers around the "task decomposition is hard" problem (§4):
+
+- **`PM_MODEL`** — the PM's single planning call can use a stronger model than the
+  workers (one call per project, negligible cost), plus a prompt rule that a task using
+  another's output must depend on it. Makes plans usually-correct.
+- **Critic** — before a project's result is delivered, `critique(goal, draft)` checks it
+  against the goal and either approves, returns a corrected version (using only facts in
+  the draft — never fabricating), or flags an unfixable concern. Best-effort: a critic
+  error never blocks delivery. This catches the residual bad plan/output the stronger
+  planner misses.
+
+### 9.5 Module additions
+```
+starling/agents/critic.py   # critique(goal, draft) -> Verdict
+blackboard.py: triggers table + add_trigger/add_watch/due_triggers/...
+scheduler.py:  _fire_due_triggers / _fire_watch / _review (critic)
+orchestrator.py: schedule/watch creation, run_goal, start_morning_brief
+schemas.py: ScheduleSpec, WatchSpec, Verdict; Classification.{schedule,watch}
+SETUP_INTEGRATIONS.md       # Gmail/Calendar/Slack OAuth + token setup
+```

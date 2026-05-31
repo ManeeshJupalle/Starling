@@ -16,10 +16,13 @@ state, crash recovery, human-in-the-loop — is hand-rolled on purpose. That
 coordination layer *is* the project.
 
 And the agents now **act**: they use tools over the [Model Context Protocol
-(MCP)](https://modelcontextprotocol.io) to read your files, repos, and the web — and
-to *write*, but only after you approve. Starling remembers your preferences, tracks
-token cost, and ships a live web dashboard so you can watch the flock work. See
-[Tool-using agents](#tool-using-agents-starling-claw).
+(MCP)](https://modelcontextprotocol.io) to read your files, repos, the web, and your
+**Gmail / Calendar / Slack** — and to *write*, but only after you approve. It also runs
+**proactively** — scheduled jobs and an inbox watcher start projects on their own and
+message you unprompted (the flagship being a parallel-fan-out **Morning Brief**) — and a
+**critic agent** checks each deliverable before it reaches you. Starling remembers your
+preferences, tracks token cost, and ships a live web dashboard so you can watch the flock
+work. See [Tool-using agents](#tool-using-agents-starling-claw).
 
 ---
 
@@ -120,11 +123,13 @@ plug in through config alone.
 
 | Capability | How |
 |---|---|
-| **Read your stuff** | MCP servers (filesystem, GitHub, web search) exposed per worker role |
-| **Take actions — safely** | writes/sends are *sensitive*: the worker **pauses and asks you to approve**, reusing the same human-in-the-loop primitive; reads auto-run |
+| **Read your stuff** | MCP servers (filesystem, GitHub, web search, **Gmail, Calendar, Slack**) exposed per worker role; a dedicated `operator` agent acts on your accounts |
+| **Take actions — safely** | writes/sends (send email, create event, post Slack) are *sensitive*: the worker **pauses and asks you to approve**, reusing the same human-in-the-loop primitive; reads auto-run |
+| **Work proactively** | **scheduled triggers** ("every morning brief me") and an **inbox watcher** start projects on their own and message you unprompted — including the **Morning Brief**, a parallel fan-out (calendar ‖ email ‖ news → one digest) |
+| **Check its own work** | a **critic agent** verifies each project's deliverable against the goal before delivery — approving, correcting (without fabricating), or flagging |
 | **Remember you** | durable preferences captured from your messages and recalled into context on later, unrelated requests |
 | **Watch it work** | a live web dashboard streaming the task graph as it executes (SSE) |
-| **Stay reliable & cheap** | per-tool timeouts, retries for reads (never blind-retrying a write), and visible token/cost tracking |
+| **Stay reliable & cheap** | per-tool timeouts, retries for reads (never blind-retrying a write), a stronger model for planning (`PM_MODEL`), and visible token/cost tracking |
 
 **Safety model.** Tools are read-only by default (a name allowlist; a whole server can
 be trusted with `"read_only": true`). Anything that changes state is gated behind your
@@ -133,7 +138,9 @@ so it survives a restart like everything else.
 
 **Adding an integration is config, not code** — drop an MCP server into
 `mcp_servers.json` and grant it to a role. The same approval gate covers it
-automatically. See [ARCHITECTURE.md §8](ARCHITECTURE.md) for the design.
+automatically. Gmail / Calendar / Slack setup (OAuth + tokens) is documented in
+[SETUP_INTEGRATIONS.md](SETUP_INTEGRATIONS.md). See [ARCHITECTURE.md §8–§9](ARCHITECTURE.md)
+for the tool-using and proactive designs.
 
 ---
 
@@ -168,9 +175,14 @@ automatically. See [ARCHITECTURE.md §8](ARCHITECTURE.md) for the design.
                               ┌──────────────────────────────────────┐
                               │             Worker pool              │
                               │  researcher · summarizer · coder ·   │
-                              │  pm (one model, role system prompts) │
+                              │  operator · pm (role system prompts) │
                               └──────────────────────────────────────┘
 ```
+
+A **proactive layer** sits beside this: the scheduler also fires **triggers**
+(time-scheduled jobs and an inbox watcher) that start projects on their own and deliver
+to your chat unprompted, and a **critic** verifies each deliverable before it's sent.
+See [ARCHITECTURE.md §9](ARCHITECTURE.md).
 
 **Channel adapter** ([starling/channels/](starling/channels/)) — turns inbound
 platform messages into `(chat_id, text)` calls and sends outbound text. It holds
@@ -196,9 +208,12 @@ it runs the ready tasks concurrently, feeds each task its upstream outputs, stor
 results, lets newly-unblocked tasks promote, and posts terminal results to the chat.
 
 **Worker pool** ([starling/agents/](starling/agents/)) — the same model with a
-different **system prompt per role**. Workers are **stateless**: prompt in, text out,
-all durable state lives in the blackboard. (Model-per-role is a one-line swap,
-documented in [roles.py](starling/agents/roles.py) but not enabled in v1.)
+different **system prompt per role** (`researcher`, `summarizer`, `coder`, `operator`,
+`pm`). The `operator` acts on your accounts (email/calendar/Slack). Workers are
+**stateless**: prompt in, text out, all durable state lives in the blackboard.
+Project planning can use a stronger model via `PM_MODEL` (it's the hardest single
+judgement); model-per-role is otherwise a one-line swap in
+[roles.py](starling/agents/roles.py).
 
 ---
 
@@ -269,10 +284,10 @@ starling/
   __main__.py        # entrypoint: wires channel + client + blackboard + scheduler + orchestrator + tools + dashboard
   config.py          # env config: LLM_*, TELEGRAM_BOT_TOKEN, TICK_INTERVAL, DASHBOARD_PORT
   llm.py             # OpenAI-compatible client factory + response helpers
-  blackboard.py      # SQLite store: projects, tasks (status/deps/checkpoint), memories
-  schemas.py         # Pydantic models: Mode, Classification, PlannedTask, ProjectPlan
-  orchestrator.py    # classify, route, ephemeral fan-out/merge, start project, route human replies + approvals
-  scheduler.py       # heartbeat + poke; ready-task dispatch, inputs, resume, reporting, pause/approval
+  blackboard.py      # SQLite store: projects, tasks (status/deps/checkpoint), memories, triggers
+  schemas.py         # Pydantic: Classification (mode/schedule/watch), ProjectPlan, Verdict
+  orchestrator.py    # classify, route, fan-out/merge, projects, human replies + approvals, triggers, morning brief
+  scheduler.py       # heartbeat + poke; ready-task dispatch, resume, reporting; fires triggers; runs the critic
   memory.py          # recall user context for prompt injection
   usage.py           # token + rough cost tracking
   channels/
@@ -280,18 +295,20 @@ starling/
     telegram.py      # Telegram adapter (python-telegram-bot, v20+ async)
     web.py           # live web dashboard (aiohttp + SSE)
   agents/
-    roles.py         # role -> system prompt + per-role MCP tool grants
+    roles.py         # role -> system prompt + per-role MCP tool grants (incl. operator); PM_MODEL
     worker.py        # run_task / resume_task — agentic tool loop, pauses for approval
-    pm.py            # decompose(goal) -> ProjectPlan  (constrained, validated, acyclic)
+    pm.py            # decompose(goal) -> ProjectPlan; morning_brief_plan() template
+    critic.py        # critique(goal, draft) -> Verdict — verify step before delivery
   tools/
-    base.py          # Tool + ToolRegistry + the read-only safety check
+    base.py          # Tool + ToolRegistry + read-only safety (write-verb guard, per-tool override)
     mcp.py           # MCPManager: connect MCP servers, wrap their tools
     builtin.py       # a tiny built-in tool
 
 scratch_phase1.py … scratch_phase6.py     # offline verification of the orchestrator
-scratch_claw_a1.py … scratch_claw_f.py    # offline verification of the tool-using layer
-mcp_servers.example.json                   # MCP server config template
-ARCHITECTURE.md                            # the design source of truth (see §8 for tools)
+scratch_claw_a1.py … scratch_claw_i2.py   # offline verification of tools, integrations, proactive layer, critic
+mcp_servers.example.json                   # MCP server config template (filesystem/github/web/gmail/calendar/slack)
+SETUP_INTEGRATIONS.md                      # Gmail / Calendar / Slack OAuth + token setup
+ARCHITECTURE.md                            # the design source of truth (§8 tools, §9 proactive + critic)
 ```
 
 The interesting code to read first: [orchestrator.py](starling/orchestrator.py)
@@ -307,10 +324,12 @@ Every LLM control-flow decision is parsed through a Pydantic model
 ([schemas.py](starling/schemas.py)) **before** the orchestrator acts on it — the
 guardrail between free-form model output and the execution loop.
 
-**Classification** — the orchestrator's first call on a new request:
+**Classification** — the orchestrator's first call on a new request (the optional
+fields capture a durable preference, a schedule, or an inbox watch when present):
 
 ```python
-{ "mode": "ephemeral" | "project", "goal": str, "workers": [str] }
+{ "mode": "ephemeral" | "project", "goal": str, "workers": [str],
+  "memory": str?, "schedule": {recurrence, at}?, "watch": {query, every_minutes}? }
 ```
 
 **ProjectPlan** — the PM's decomposition (`depends_on` indexes into the same list,
@@ -349,10 +368,13 @@ Environment variables (see [.env.example](.env.example)):
 | `LLM_API_KEY`        | API key for your provider (OpenRouter / Groq / OpenAI) |
 | `LLM_BASE_URL`       | Provider base URL (defaults to OpenRouter; Groq/OpenAI presets in `.env.example`) |
 | `LLM_MODEL`          | Model id, e.g. `openai/gpt-4o-mini`        |
+| `PM_MODEL`           | *Optional* — stronger model for project planning only (falls back to `LLM_MODEL`) |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token from [@BotFather](https://t.me/BotFather) |
 | `TICK_INTERVAL`      | Scheduler heartbeat in seconds (default 5) |
 
-Get a bot token by messaging **@BotFather** on Telegram (`/newbot`).
+Get a bot token by messaging **@BotFather** on Telegram (`/newbot`). To connect Gmail /
+Calendar / Slack, follow [SETUP_INTEGRATIONS.md](SETUP_INTEGRATIONS.md) — those servers
+ship disabled and are skipped until you set them up.
 
 ---
 
@@ -370,6 +392,11 @@ Then message your bot on Telegram. Try one of each mode:
   project that runs to completion and posts the result.
 - *"plan a weekend itinerary, but ask me which city first"* → a project that pauses,
   asks, and resumes on your reply.
+- *"every morning at 8am give me a brief"* → schedules a daily **Morning Brief** that
+  fans out (calendar ‖ email ‖ news) and messages you the digest unprompted.
+- *"watch my inbox for new unread emails and summarize them"* → an inbox watcher that
+  reacts when something new arrives. (Both need Gmail/Calendar connected — see
+  [SETUP_INTEGRATIONS.md](SETUP_INTEGRATIONS.md).)
 
 Open **http://localhost:8000** to watch the live dashboard — tasks flip through
 ready → running → done in real time, a task turns purple when it pauses for your
@@ -466,8 +493,19 @@ Then **Starling-Claw** evolved the workers from *text* into *action*:
 | E      | Live web dashboard (SSE task-graph view)                     |   ✅   |
 | F      | Reliability — tool retries/timeouts + token-cost tracking    |   ✅   |
 
-See [CLAUDE_CODE_PROMPTS.md](CLAUDE_CODE_PROMPTS.md) for the per-phase build spec and
-[ARCHITECTURE.md](ARCHITECTURE.md) (§8 for the tool-using layer) for the design.
+Then **G·H·I** turned it into a proactive, integrated personal agent:
+
+| Phase | Deliverable                                                         | Status |
+| ----- | ------------------------------------------------------------------- | :----: |
+| G1–G2 | Real integrations — Gmail / Calendar / Slack + `operator` agent; writes behind approval; safety-heuristic tuning |   ✅   |
+| H1    | Proactive scheduled triggers + unprompted Telegram delivery         |   ✅   |
+| H2    | Inbox watcher — an event trigger that reacts to new mail            |   ✅   |
+| H3    | **Morning Brief** — parallel fan-out (calendar ‖ email ‖ news) → digest |   ✅   |
+| I1    | Stronger planner (`PM_MODEL`) + data-dependency planning fix        |   ✅   |
+| I2    | Critic / verify step before every project deliverable               |   ✅   |
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) (§8 tool-using layer, §9 proactive + critic) for
+the design, and [SETUP_INTEGRATIONS.md](SETUP_INTEGRATIONS.md) to connect your accounts.
 
 ---
 
