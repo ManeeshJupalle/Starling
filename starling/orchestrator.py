@@ -15,7 +15,7 @@ from typing import Any, Optional
 
 from openai import AsyncOpenAI
 
-from .agents.pm import decompose, topological_order
+from .agents.pm import decompose, morning_brief_plan, topological_order
 from .agents.roles import WORKER_ROLES, active_model, tools_for_role
 from .agents.worker import resume_task, run_task
 from .blackboard import Blackboard, TaskStatus
@@ -90,6 +90,12 @@ def _is_affirmative(text: str) -> bool:
     return bool(words) and words[0] in _AFFIRMATIVE
 
 
+def is_morning_brief(text: str) -> bool:
+    """Whether a goal is the canned morning-brief template (Phase H3)."""
+    t = text.lower()
+    return "morning brief" in t or "daily brief" in t or "morning briefing" in t
+
+
 class Orchestrator:
     """Classifies and routes inbound messages, sending replies via the channel."""
 
@@ -129,6 +135,9 @@ class Orchestrator:
                 await self._channel.send(
                     chat_id, self._create_watch(chat_id, classification.goal, classification.watch)
                 )
+                return
+            if is_morning_brief(classification.goal):
+                await self._channel.send(chat_id, await self.start_morning_brief(chat_id))
                 return
             if classification.mode == Mode.EPHEMERAL:
                 reply = await self._run_ephemeral(chat_id, classification)
@@ -220,7 +229,12 @@ class Orchestrator:
         the scheduler drives the tasks to completion.
         """
         plan = await decompose(classification.goal, client=self._client)
-        project_id = self._bb.create_project(chat_id, classification.goal)
+        project_id = self._insert_plan(chat_id, classification.goal, plan)
+        return f"Project #{project_id} started - {len(plan.tasks)} tasks queued."
+
+    def _insert_plan(self, chat_id: int, goal: str, plan) -> int:
+        """Persist a ProjectPlan's tasks in dependency order; return the project id."""
+        project_id = self._bb.create_project(chat_id, goal)
         id_by_index: dict[int, int] = {}
         for index in topological_order(plan.tasks):
             task = plan.tasks[index]
@@ -231,7 +245,13 @@ class Orchestrator:
         print(f"[orchestrator] project #{project_id}: {len(plan.tasks)} tasks queued")
         if self._scheduler is not None:
             self._scheduler.poke()  # start executing the new tasks now
-        return f"Project #{project_id} started - {len(plan.tasks)} tasks queued."
+        return project_id
+
+    async def start_morning_brief(self, chat_id: int) -> str:
+        """Kick off the canned morning-brief project (parallel fan-out + merge, H3)."""
+        plan = morning_brief_plan()
+        self._insert_plan(chat_id, "Morning brief", plan)
+        return f"Good morning! Putting your brief together - {len(plan.tasks)} agents on it. Results shortly."
 
     async def run_goal(self, chat_id: int, goal: str) -> None:
         """Classify and run a goal proactively (a trigger fired it), delivering to the chat.
@@ -241,6 +261,9 @@ class Orchestrator:
         results are sent here; project results arrive later via ``report_if_complete``.
         """
         try:
+            if is_morning_brief(goal):
+                await self._channel.send(chat_id, await self.start_morning_brief(chat_id))
+                return
             classification = await self._classify(goal)
             print(f"[orchestrator] trigger fired -> {classification.mode.value}: {goal[:60]}")
             if classification.mode == Mode.EPHEMERAL:

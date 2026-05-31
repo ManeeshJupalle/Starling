@@ -84,6 +84,31 @@ def _get_client() -> AsyncOpenAI:
     return _client
 
 
+def morning_brief_plan() -> ProjectPlan:
+    """A canned multi-agent 'morning brief' (Phase H3).
+
+    Three specialists gather in parallel — calendar, inbox, news — and a summarizer
+    merges them into one digest. Hand-built rather than PM-decomposed so the flagship
+    proactive demo is deterministic; it's a normal project once inserted, so the
+    scheduler runs the fan-out concurrently and delivers the result like any other.
+    """
+    return ProjectPlan(tasks=[
+        PlannedTask(role="operator", depends_on=[],
+                    description="List everything on my calendar for today, with times. "
+                                "If you can't access the calendar, say so briefly."),
+        PlannedTask(role="operator", depends_on=[],
+                    description="Summarize my unread emails from today: sender and a "
+                                "one-line gist each. If you can't access email, say so briefly."),
+        PlannedTask(role="researcher", depends_on=[],
+                    description="Give 3-5 top world and technology news headlines for today, "
+                                "one line each."),
+        PlannedTask(role="summarizer", depends_on=[0, 1, 2],
+                    description="Write a concise 'good morning' brief that combines today's "
+                                "calendar, the email summary, and the news headlines into a "
+                                "single friendly digest with short sections."),
+    ])
+
+
 def topological_order(tasks: list[PlannedTask]) -> list[int]:
     """Return task indices in dependency order. Raises ValueError on a cycle."""
     n = len(tasks)
