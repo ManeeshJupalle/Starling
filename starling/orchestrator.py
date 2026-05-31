@@ -16,7 +16,7 @@ from openai import AsyncOpenAI
 
 from .agents.pm import decompose, topological_order
 from .agents.roles import WORKER_ROLES, active_model, tools_for_role
-from .agents.worker import run_task
+from .agents.worker import resume_task, run_task
 from .blackboard import Blackboard, TaskStatus
 from .channels.base import Channel
 from .llm import text_of, tool_args
@@ -63,6 +63,15 @@ _CLASSIFY_TOOL = {
 }
 
 
+_AFFIRMATIVE = {"yes", "y", "yeah", "yep", "ok", "okay", "sure", "approve", "approved", "go", "do"}
+
+
+def _is_affirmative(text: str) -> bool:
+    """Treat only a clear yes as approval; anything else is a safe-default no."""
+    words = text.strip().lower().split()
+    return bool(words) and words[0] in _AFFIRMATIVE
+
+
 class Orchestrator:
     """Classifies and routes inbound messages, sending replies via the channel."""
 
@@ -100,12 +109,44 @@ class Orchestrator:
             await self._channel.send(chat_id, f"Sorry — I hit an error: {exc}")
 
     async def _answer_human(self, chat_id: int, task: dict[str, Any], text: str) -> None:
-        """Store the user's reply as the paused task's answer and resume the project."""
+        """Route the reply: a tool-approval (task has a checkpoint) or a PM-question answer."""
+        if task.get("checkpoint"):
+            await self._resume_tool_approval(chat_id, task, text)
+            return
+        # PM-question answer: store it as the task's output and resume the project.
         self._bb.set_status(task["id"], TaskStatus.DONE, output=text)
         await self._channel.send(chat_id, "Got it - continuing.")
         if self._scheduler is not None:
             self._scheduler.poke()  # newly-unblocked tasks can run now
             # If the answer finished the last task, report now — no worker will fire.
+            await self._scheduler.report_if_complete(task["project_id"])
+
+    async def _resume_tool_approval(self, chat_id: int, task: dict[str, Any], text: str) -> None:
+        """Resume a worker paused on a sensitive tool call, per the user's yes/no."""
+        approved = _is_affirmative(text)
+        checkpoint = task["checkpoint"]
+        tools = tools_for_role(self._tools_mgr, task["role"], allow_sensitive=True)
+        self._bb.set_status(task["id"], TaskStatus.RUNNING)
+        await self._channel.send(chat_id, "Approved - running it." if approved else "Okay, skipping that.")
+        try:
+            result = await resume_task(
+                task["role"], checkpoint["messages"], checkpoint["remaining"], approved,
+                client=self._client, tools=tools,
+            )
+        except Exception as exc:
+            print(f"[orchestrator] resume error: {exc}")
+            self._bb.set_status(task["id"], TaskStatus.FAILED, output=f"error: {exc}")
+            return
+        if not result.done:  # the worker wants approval for another sensitive action
+            self._bb.set_status(
+                task["id"], TaskStatus.AWAITING_HUMAN, question=result.question,
+                checkpoint={"messages": result.messages, "remaining": result.remaining},
+            )
+            await self._channel.send(chat_id, result.question)
+            return
+        self._bb.set_status(task["id"], TaskStatus.DONE, output=result.output)
+        if self._scheduler is not None:
+            self._scheduler.poke()
             await self._scheduler.report_if_complete(task["project_id"])
 
     async def _classify(self, text: str) -> Classification:
@@ -125,14 +166,14 @@ class Orchestrator:
     async def _run_ephemeral(self, classification: Classification) -> str:
         """Fan out to the chosen workers in parallel, then merge into one reply."""
         workers = [w for w in classification.workers if w in WORKER_ROLES] or ["summarizer"]
-        outputs = await asyncio.gather(
+        results = await asyncio.gather(
             *(
                 run_task(role, classification.goal, client=self._client,
-                         tools=tools_for_role(self._tools_mgr, role))
+                         tools=tools_for_role(self._tools_mgr, role, allow_sensitive=False))
                 for role in workers
             )
         )
-        drafts = list(zip(workers, outputs))
+        drafts = [(role, result.output) for role, result in zip(workers, results)]
         if len(drafts) == 1:
             return drafts[0][1]
         return await self._merge(classification.goal, drafts)

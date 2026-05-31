@@ -60,14 +60,16 @@ ROLE_TOOLS: dict[str, list[str]] = {
 }
 
 
-def tools_for_role(manager, role: str):
-    """The read-only ToolRegistry a role may use, or None if it has no tools/manager.
+def tools_for_role(manager, role: str, allow_sensitive: bool = False):
+    """The ToolRegistry a role may use, or None if it has no tools/manager.
 
-    ``manager`` is an MCPManager (duck-typed to keep this module free of tool imports).
+    Read-only by default; ``allow_sensitive=True`` (scheduler tasks, which can pause for
+    approval) also exposes write tools. ``manager`` is an MCPManager (duck-typed to keep
+    this module free of tool imports).
     """
     if manager is None:
         return None
     servers = ROLE_TOOLS.get(role, [])
     if not servers:
         return None
-    return manager.registry_for(servers, include_sensitive=False)
+    return manager.registry_for(servers, include_sensitive=allow_sensitive)

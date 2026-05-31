@@ -82,18 +82,33 @@ class Scheduler:
         self._bb.set_status(task["id"], TaskStatus.RUNNING)
         try:
             inputs = self._gather_inputs(task)
-            output = await run_task(
-                task["role"], task["description"], inputs,
-                client=self._client, tools=tools_for_role(self._tools_mgr, task["role"]),
+            result = await run_task(
+                task["role"], task["description"], inputs, client=self._client,
+                tools=tools_for_role(self._tools_mgr, task["role"], allow_sensitive=True),
+                allow_sensitive=True,
             )
         except Exception as exc:  # record the failure and move on; dependents stall
             print(f"[scheduler] task #{task['id']} FAILED: {exc}")
             self._bb.set_status(task["id"], TaskStatus.FAILED, output=f"error: {exc}")
             return
-        self._bb.set_status(task["id"], TaskStatus.DONE, output=output)
-        task["output"] = output  # keep the in-memory dict in sync for reporting
+        if not result.done:  # the worker wants approval for a sensitive action
+            await self._pause_for_approval(task, result)
+            return
+        self._bb.set_status(task["id"], TaskStatus.DONE, output=result.output)
+        task["output"] = result.output  # keep the in-memory dict in sync for reporting
         print(f"[scheduler] task #{task['id']} done")
         await self.report_if_complete(task["project_id"])
+
+    async def _pause_for_approval(self, task: dict[str, Any], result) -> None:
+        """Park a task that wants a sensitive action and ask the user to approve it."""
+        checkpoint = {"messages": result.messages, "remaining": result.remaining}
+        self._bb.set_status(
+            task["id"], TaskStatus.AWAITING_HUMAN, question=result.question, checkpoint=checkpoint
+        )
+        print(f"[scheduler] task #{task['id']} awaiting approval - asked in chat")
+        project = self._bb.get_project(task["project_id"]) if task["project_id"] else None
+        if project is not None:
+            await self._channel.send(project["chat_id"], result.question)
 
     async def _ask_human(self, task: dict[str, Any]) -> None:
         """Pause a 'pm' question task: store the question and ask it in the chat.

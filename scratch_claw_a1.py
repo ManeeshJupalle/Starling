@@ -49,13 +49,14 @@ async def test_tool_loop() -> None:
         tool_response("add", {"a": 2, "b": 3}),  # round 1: model calls the tool
         text_response("The answer is 5."),        # round 2: model gives the final answer
     ])
-    out = await run_task("researcher", "What is 2+3? Use the add tool.", client=client, tools=registry)
+    result = await run_task("researcher", "What is 2+3? Use the add tool.", client=client, tools=registry)
 
     check("tool executed once", len(seen) == 1)
     check("tool received the parsed args", seen[0] == {"a": 2, "b": 3})
     check("two model rounds (tool call + final)", client.calls == 2)
     check("tools were offered to the model", "tools" in client.last_kwargs)
-    check("final answer returned", out == "The answer is 5.")
+    check("loop finished", result.done)
+    check("final answer returned", result.output == "The answer is 5.")
 
 
 async def test_builtin_add() -> None:
@@ -71,10 +72,10 @@ async def test_builtin_add() -> None:
 async def test_no_tools_backcompat() -> None:
     print("\nno-tools path (unchanged single call -> text):")
     client = SequenceClient([text_response("hello world")])
-    out = await run_task("summarizer", "say hi", client=client)
+    result = await run_task("summarizer", "say hi", client=client)
     check("one model call", client.calls == 1)
     check("no tools offered when none given", "tools" not in client.last_kwargs)
-    check("returns the text", out == "hello world")
+    check("returns the text", result.done and result.output == "hello world")
 
 
 async def main() -> None:

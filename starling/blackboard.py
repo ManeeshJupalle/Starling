@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     inputs      TEXT    NOT NULL DEFAULT '{}',
     output      TEXT,
     question    TEXT,
+    checkpoint  TEXT,
     created_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -133,8 +134,9 @@ class Blackboard:
         *,
         output: Any = None,
         question: Optional[str] = None,
+        checkpoint: Any = None,
     ) -> None:
-        """Update a task's status, optionally storing its ``output`` or ``question``."""
+        """Update a task's status, optionally storing ``output``/``question``/``checkpoint``."""
         fields = ["status = ?", "updated_at = CURRENT_TIMESTAMP"]
         params: list[Any] = [TaskStatus(status).value]
         if output is not None:
@@ -143,6 +145,9 @@ class Blackboard:
         if question is not None:
             fields.append("question = ?")
             params.append(question)
+        if checkpoint is not None:
+            fields.append("checkpoint = ?")
+            params.append(json.dumps(checkpoint))
         params.append(task_id)
         with self._lock:
             self._conn.execute(
@@ -240,4 +245,5 @@ class Blackboard:
         task["depends_on"] = json.loads(task["depends_on"])
         task["inputs"] = json.loads(task["inputs"])
         task["output"] = json.loads(task["output"]) if task["output"] is not None else None
+        task["checkpoint"] = json.loads(task["checkpoint"]) if task["checkpoint"] is not None else None
         return task
