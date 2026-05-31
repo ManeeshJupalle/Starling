@@ -9,3 +9,6 @@ __pycache__/
 
 # Runtime logs
 *.log
+
+# Local build-notes (reference only, intentionally not shared)
+Starling-claw-prompts.md

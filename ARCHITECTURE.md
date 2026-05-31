@@ -28,7 +28,10 @@ problem single-assistant tools don't address — and it's the portfolio signal.
 
 **Stack discipline.** No agent framework (no LangChain/CrewAI/AutoGen). The
 orchestration loop is hand-rolled on purpose — that's the thing being demonstrated.
-Python · `anthropic` SDK · `python-telegram-bot` · stdlib `sqlite3` · `pydantic`.
+Python · `openai` SDK pointed at any OpenAI-compatible provider (OpenRouter / Groq /
+OpenAI) · `python-telegram-bot` · stdlib `sqlite3` · `pydantic` · `mcp` (Model Context
+Protocol, for tools — see §8). MCP is a *tool* protocol, not an orchestration layer, so
+the loop stays hand-rolled.
 
 ---
 
@@ -179,3 +182,63 @@ starling/
 - Model-per-role mixing.
 - Multi-node / concurrent scheduler workers.
 - Auth / multi-tenant (single-user assistant by design).
+
+---
+
+## 8. Evolution: tool-using agents (Starling-Claw)
+
+v1 (§1–§7) coordinates agents that only emit **text**. The next direction —
+*Starling-Claw* — keeps the entire coordination engine and upgrades the **workers**
+from text generators into **tool-using agents that act**: read your files, calendar,
+email, and repos (and later write to them) via the **Model Context Protocol (MCP)**.
+
+The phased, build-ready plan lives in **`Starling-claw-prompts.md`**; this section is
+the design context those prompts reference. We evolve the existing code in place —
+nothing in §1–§6 is replaced; only the worker grows a loop and a tool layer is added.
+
+**Thesis shift:** from *coordinated text* to *coordinated action*. The coordination
+layer (orchestrator, blackboard, scheduler, PM decomposition, human-in-the-loop) is
+unchanged and reused.
+
+### 8.1 Tool layer
+A `Tool` is `{name, description, JSON-schema, async call(args) -> str}`. A
+`ToolRegistry` exposes the tools a given role may use as OpenAI function definitions
+and routes calls by name.
+
+### 8.2 MCP integration
+Rather than hand-code each integration, an `MCPManager` connects to configured MCP
+servers (filesystem, GitHub, Google, Slack, …) over stdio, discovers their tools, and
+wraps each as a `Tool` (namespaced `server__tool`; MCP `inputSchema` → tool schema).
+One client, many pre-built integrations. Servers are declared in `mcp_servers.json`
+(Claude-Desktop format). The manager owns the long-lived sessions for the app's
+lifetime (via `contextlib.AsyncExitStack`).
+
+### 8.3 Worker = agentic loop
+`run_task` becomes a loop: offer the role's tools, let the model call them, execute,
+feed results back, repeat until a final answer (iteration-capped). Read-only tools
+auto-run — that's the first milestone.
+
+### 8.4 Per-role tools
+`roles.py` maps each role to the servers/tools it may use, so a researcher gets read
+tools, an "operator" gets calendar/file actions, etc.
+
+### 8.5 Human-in-the-loop reused as the approval layer
+When an agent wants a **sensitive** action (write/send/delete), the task checkpoints
+its in-flight loop state to the blackboard, goes `awaiting_human`, and asks for
+approval — the exact pause/ask/route primitive from §3, now guarding real-world side
+effects. Workers stay stateless *between* tasks; a paused task carries its loop state.
+
+### 8.6 Module additions
+```
+starling/tools/base.py   # Tool, ToolRegistry
+starling/tools/mcp.py    # MCPManager: connect servers, discover + route tool calls
+mcp_servers.json         # which MCP servers to launch (Claude-Desktop format; gitignore if it holds tokens)
+```
+Plus: `worker.py` grows the tool loop; `roles.py` gains per-role tool sets; the
+scheduler passes each task its role's tools; requirements add `mcp` (and Node.js is
+needed for the common `npx`-launched reference servers).
+
+### 8.7 Safety (non-negotiable once agents act)
+Read tools expose personal data to the model provider — expected for a personal agent,
+but know it happens. Write/destructive tools are approval-gated (§8.5); code/shell
+tools must be sandboxed. Start read-only; add writes only behind the approval flow.
