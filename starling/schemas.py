@@ -83,3 +83,15 @@ class ProjectPlan(BaseModel):
     """The PM's task graph for a project goal (ARCHITECTURE.md §5)."""
 
     tasks: list[PlannedTask]
+
+
+class Verdict(BaseModel):
+    """A critic's check of a deliverable against the goal (Phase I2)."""
+
+    ok: bool = Field(description="True if the draft adequately and correctly meets the goal.")
+    reason: str = Field(default="", description="Brief explanation when not ok.")
+    revised: Optional[str] = Field(
+        default=None,
+        description="A corrected deliverable (using only facts already in the draft) when "
+        "the shortfall is fixable; null otherwise.",
+    )

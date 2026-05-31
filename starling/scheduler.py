@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from openai import AsyncOpenAI
 
+from .agents.critic import critique
 from .agents.roles import tools_for_role
 from .agents.worker import run_task
 from .blackboard import Blackboard, TaskStatus
@@ -244,6 +245,29 @@ class Scheduler:
             and not any(t["id"] in other["depends_on"] for other in tasks)
         ]
         result = "\n\n".join(t["output"] for t in sinks if t["output"]) or "(no output)"
+        result = await self._review(project["goal"], result)  # critic pass before delivery
         self._reported.add(project_id)
         print(f"[scheduler] project #{project_id} complete  |  usage: {usage.snapshot()}")
         await self._channel.send(project["chat_id"], f"Project #{project_id} complete:\n\n{result}")
+
+    async def _review(self, goal: str, draft: str) -> str:
+        """Run the critic over a deliverable; return the approved or corrected text.
+
+        Best-effort: if the critic is unavailable or errors, the draft ships as-is — a
+        verify step must never block delivery. An unfixable concern is appended as a note.
+        """
+        if self._client is None or not draft or draft == "(no output)":
+            return draft
+        try:
+            verdict = await critique(goal, draft, client=self._client)
+        except Exception as exc:
+            print(f"[scheduler] critic failed (delivering as-is): {exc}")
+            return draft
+        if verdict.ok:
+            print("[scheduler] critic: approved")
+            return draft
+        if verdict.revised:
+            print(f"[scheduler] critic revised the deliverable: {verdict.reason[:60]}")
+            return verdict.revised
+        print(f"[scheduler] critic flagged (unfixable): {verdict.reason[:60]}")
+        return f"{draft}\n\n(Note from review: {verdict.reason})"
